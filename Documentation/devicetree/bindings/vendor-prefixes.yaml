@@ -220,7 +220,7 @@ patternProperties:
     description: Shenzhen BigTree Tech Co., LTD
   "^bitmain,.*":
     description: Bitmain Technologies
-  "^blokaslabs,.*":
+  "^blokas(labs)?,.*":
     description: Vilniaus Blokas UAB
   "^blutek,.*":
     description: BluTek Power
