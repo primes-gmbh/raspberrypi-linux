@@ -220,6 +220,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	pitft28-resistive.dtbo \
 	pitft35-resistive.dtbo \
 	pps-gpio.dtbo \
+	primes-unicam.dtbo \
 	proto-codec.dtbo \
 	pwm.dtbo \
 	pwm-2chan.dtbo \
