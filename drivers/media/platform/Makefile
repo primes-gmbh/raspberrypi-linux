@@ -22,6 +22,7 @@ obj-y += microchip/
 obj-y += nuvoton/
 obj-y += nvidia/
 obj-y += nxp/
+obj-y += primes-bcm2835/
 obj-y += qcom/
 obj-y += raspberrypi/
 obj-y += renesas/

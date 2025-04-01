@@ -1,0 +1,9 @@
+# Broadcom VideoCore4 V4L2 camera support
+
+config VIDEO_PRIMES_BCM2835_UNICAM
+	tristate "Broadcom BCM283x/BCM271x Unicam video capture driver for FPGA"
+	depends on ARCH_BCM2835 || COMPILE_TEST
+	depends on IIO_BUFFER_DMA 
+	select MEDIA_CONTROLLER
+	help
+	  This module will be called bcm2835-unicam-primes.
