@@ -1,3 +1,4 @@
+#include "linux/drbd.h"
 #include <linux/dma-buf.h>
 #include <linux/kernel.h>
 #include "linux/mod_devicetable.h"
@@ -31,6 +32,8 @@
 #include <linux/iio/buffer-dmaengine.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/of.h>
+#include <linux/iio/sysfs.h>
+#include <linux/i2c.h>
 
 // #include "bcm2835-iio-dma-buffer.h"
 #include "vc4-regs-unicam.h"
@@ -39,10 +42,6 @@
 #define UNICAM_VERSION "0.1.0"
 
 #define BPL_ALIGNMENT 32
-#define BYTES_PER_LINE ALIGN(1024, BPL_ALIGNMENT)
-#define LINES_PER_FRAME 4096
-#define BYTES_PER_IMAGE (LINES_PER_FRAME * BYTES_PER_LINE)
-#define STRIDE (BYTES_PER_LINE)
 #define DUMMY_BUF_SIZE PAGE_SIZE
 
 /*
@@ -51,6 +50,27 @@
  */
 #define MIN_VPU_CLOCK_RATE (250 * 1000 * 1000)
 
+enum {
+	PRIMES_I2C_REG_C_TEST_PATTERN_CONFIG = 0x81,
+	PRIMES_I2C_REG_C_MIPI_TX_VC = 0xa8,
+	PRIMES_I2C_REG_C_MIPI_TX_TYPE = 0xa9,
+	PRIMES_I2C_REG_C_MIPI_TX_LANES = 0xaa,
+	PRIMES_I2C_REG_C_MIPI_TX_FRAME_MODE = 0xab,
+	PRIMES_I2C_REG_C_MIPI_TX_HRES = 0xac,
+	PRIMES_I2C_REG_C_MIPI_TX_ULPS_ENTER = 0xae,
+	PRIMES_I2C_REG_C_MIPI_TX_ULPS_EXIT = 0xaf,
+	PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_ENTER = 0xb0,
+	PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_EXIT = 0xb1,
+	PRIMES_I2C_REG_C_MIPI_HSA = 0xb2,
+	PRIMES_I2C_REG_C_MIPI_HBP = 0xb4,
+	PRIMES_I2C_REG_C_MIPI_HACT = 0xb6,
+	PRIMES_I2C_REG_C_MIPI_HFP = 0xb8,
+	PRIMES_I2C_REG_C_MIPI_VSA = 0xba,
+	PRIMES_I2C_REG_C_MIPI_VBP = 0xbc,
+	PRIMES_I2C_REG_C_MIPI_VACT = 0xbe,
+	PRIMES_I2C_REG_C_MIPI_VFP = 0xc0,
+};
+
 /*
  * Size of the dummy buffer allocation.
  *
@@ -58,8 +78,6 @@
  * (not yet fully known) conditions, the dummy buffer allocation is set to a
  * a single page size, but the hardware gets programmed with a buffer size of 0.
  */
-
-enum pad_types { IMAGE_PAD, METADATA_PAD, MAX_NODES };
 
 struct unicam_device {
 	/* peripheral base address */
@@ -81,8 +99,8 @@ struct unicam_device {
          * Stores bus.mipi_csi2.flags for CSI2 sensors, or
          * bus.mipi_csi1.strobe for CCP2.
          */
-	unsigned int max_data_lanes;
 	unsigned int active_data_lanes;
+	u16 stride;
 
 	bool frame_started;
 
@@ -96,9 +114,10 @@ struct unicam_device {
 	spinlock_t list_lock;
 	struct list_head block_list;
 
-	u64 total_bytes;
 	u64 start_time;
 	u64 total_frames;
+
+	struct i2c_client *sensor_client;
 };
 
 static int unicam_log_status(struct unicam_device *unicam);
@@ -160,16 +179,11 @@ static inline void unicam_runtime_put(struct unicam_device *dev)
 }
 
 static void unicam_wr_dma_addr(struct unicam_device *dev, dma_addr_t dmaaddr,
-			       unsigned int buffer_size, int pad_id)
+			       unsigned int buffer_size)
 {
 	dma_addr_t endaddr = dmaaddr + buffer_size;
-	if (pad_id == IMAGE_PAD) {
-		reg_write(dev, UNICAM_IBSA0, dmaaddr);
-		reg_write(dev, UNICAM_IBEA0, endaddr);
-	} else {
-		reg_write(dev, UNICAM_DBSA0, dmaaddr);
-		reg_write(dev, UNICAM_DBEA0, endaddr);
-	}
+	reg_write(dev, UNICAM_IBSA0, dmaaddr);
+	reg_write(dev, UNICAM_IBEA0, endaddr);
 }
 
 static void unicam_schedule_next_block(struct unicam_device *unicam)
@@ -196,7 +210,7 @@ static void unicam_schedule_next_block(struct unicam_device *unicam)
 		phys_addr = sg_dma_address(sgl);
 		size = sg_dma_len(sgl);
 	}
-	unicam_wr_dma_addr(unicam, phys_addr, size, IMAGE_PAD);
+	unicam_wr_dma_addr(unicam, phys_addr, size);
 	unicam->next_block = block;
 	// printk("scheduling next_block: phys_addr=%llu size=%zu\n", phys_addr,
 	//        size);
@@ -204,7 +218,7 @@ static void unicam_schedule_next_block(struct unicam_device *unicam)
 
 static void unicam_schedule_dummy_block(struct unicam_device *unicam)
 {
-	unicam_wr_dma_addr(unicam, unicam->dummy_dma_addr, 0, IMAGE_PAD);
+	unicam_wr_dma_addr(unicam, unicam->dummy_dma_addr, 0);
 	unicam->next_block = NULL;
 }
 
@@ -221,8 +235,6 @@ static void unicam_process_block_done(struct unicam_device *unicam)
  * It changes status of the captured buffer, takes next buffer from the queue
  * and sets its address in unicam registers
  */
-
-static u64 seq = 0;
 
 static irqreturn_t unicam_isr(int irq, void *dev)
 {
@@ -245,6 +257,8 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 		return IRQ_HANDLED;
 	}
 
+	// spin_lock(&unicam->list_lock);
+
 	/*
 	 * Look for either the Frame End interrupt or the Packet Capture status
 	 * to signal a frame end.
@@ -263,7 +277,6 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 		if (unicam->cur_block &&
 		    unicam->cur_block != unicam->next_block) {
 			unicam->cur_block->bytes_used = unicam->cur_block->size;
-			unicam->total_bytes += BYTES_PER_IMAGE;
 			unicam_process_block_done(unicam);
 			unicam->cur_block = unicam->next_block;
 			unicam->next_block = NULL;
@@ -288,14 +301,13 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 		}
 	}
 
-	char *reason = "unknown";
-
 	// Schedule the next block
+	char *reason = "unknown";
 	if (ista & (UNICAM_FSI | UNICAM_LCI) && !fe) {
 		spin_lock(&unicam->list_lock);
 		if (!list_empty(&unicam->block_list) && !unicam->next_block) {
-			scheduled_dummy_buffer = false;
 			unicam_schedule_next_block(unicam);
+			scheduled_dummy_buffer = false;
 		} else if (list_empty(&unicam->block_list)) {
 			reason = "block_list is empty";
 		} else if (unicam->next_block) {
@@ -305,6 +317,8 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	} else {
 		reason = "FSI and FEI at the same time";
 	}
+
+	static u64 seq = 0, last_seq = 0;
 
 	// if (scheduled_dummy_buffer) {
 	// 	printk("============== %4llu ==============\n", seq);
@@ -324,9 +338,9 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	// 	}
 	// 	last_seq = seq;
 	// }
-
 	seq++;
-	// printk("==================================\n");
+
+	// spin_unlock(&unicam->list_lock);
 
 	return IRQ_HANDLED;
 }
@@ -357,11 +371,19 @@ static void unicam_start_rx(struct unicam_device *unicam)
 	unsigned int i;
 	u32 val;
 
-	int line_int_freq = unicam->queue[0].fileio.block_size / STRIDE;
+	/* It seems like line_int_freq should be set to something high enough to avoid certain linux
+	 * errors such as CPU stalls or raspi frimware errors */
+	int line_int_freq =
+		(unicam->queue[0].fileio.block_size / unicam->stride) >> 2;
+	if (line_int_freq < 128) {
+		line_int_freq = 128;
+	}
+	// int line_int_freq = 1;
 	dev_info(
 		&unicam->pdev->dev,
 		"stride size: %d bytes, buffer size: %zu bytes -> setting line_int_freq to %d\n",
-		STRIDE, unicam->queue[0].fileio.block_size, line_int_freq);
+		unicam->stride, unicam->queue[0].fileio.block_size,
+		line_int_freq);
 
 	/* Enable lane clocks */
 	val = 1;
@@ -488,8 +510,9 @@ static void unicam_start_rx(struct unicam_device *unicam)
 	//    dev->node[IMAGE_PAD].v_fmt.fmt.pix.bytesperline);
 	// size = dev->node[IMAGE_PAD].v_fmt.fmt.pix.sizeimage;
 	// reg_write(dev, UNICAM_IBLS, ALIGN(8, BPL_ALIGNMENT));
-	reg_write(unicam, UNICAM_IBLS, STRIDE);
-	unicam_wr_dma_addr(unicam, unicam->dummy_dma_addr, 0, IMAGE_PAD);
+	reg_write(unicam, UNICAM_IBLS, unicam->stride);
+	// unicam_wr_dma_addr(unicam, unicam->dummy_dma_addr, 0);
+	unicam_schedule_next_block(unicam);
 	unicam_set_packing_config(unicam);
 	// const unsigned int raw8 = 0x2a;
 	const unsigned int embedded_8bit_non_image_data = 0x12;
@@ -525,10 +548,10 @@ static void unicam_disable(struct unicam_device *unicam)
 	reg_write(unicam, UNICAM_DAT0, 0);
 	reg_write(unicam, UNICAM_DAT1, 0);
 
-	if (unicam->max_data_lanes > 2) {
-		reg_write(unicam, UNICAM_DAT2, 0);
-		reg_write(unicam, UNICAM_DAT3, 0);
-	}
+	// if (unicam->max_data_lanes > 2) {
+	reg_write(unicam, UNICAM_DAT2, 0);
+	reg_write(unicam, UNICAM_DAT3, 0);
+	// }
 
 	/* Peripheral reset */
 	reg_write_field(unicam, UNICAM_CTRL, 1, UNICAM_CPR);
@@ -574,6 +597,102 @@ static int unicam_log_status(struct unicam_device *unicam)
 	return 0;
 }
 
+static u8 primes_read_mipi_tx_lanes(struct unicam_device *unicam)
+{
+	u8 res = 2;
+	if (unicam->sensor_client) {
+		s32 data = i2c_smbus_read_byte_data(
+				   unicam->sensor_client,
+				   PRIMES_I2C_REG_C_MIPI_TX_LANES) +
+			   1;
+		if (data < 0) {
+			dev_warn(
+				&unicam->pdev->dev,
+				"Could not read C_MIPI_TX_LANES from FPGA, using default of 2");
+		} else {
+			res = data;
+		}
+	}
+	return res;
+}
+
+static u16 primes_read_mipi_tx_hres(struct unicam_device *unicam)
+{
+	u16 res = 1024;
+	if (unicam->sensor_client) {
+		s32 data_0 = i2c_smbus_read_byte_data(
+			unicam->sensor_client, PRIMES_I2C_REG_C_MIPI_TX_HRES);
+		s32 data_1 = i2c_smbus_read_byte_data(
+			unicam->sensor_client,
+			PRIMES_I2C_REG_C_MIPI_TX_HRES + 1);
+		if (data_0 < 0 || data_1 < 0) {
+			dev_warn(
+				&unicam->pdev->dev,
+				"Could not read C_MIPI_TX_HRES from FPGA, using default of 1024");
+		}
+		res = data_0 << 8 | data_1;
+	}
+	return res;
+}
+
+static struct i2c_client *create_i2c_client_from_node(struct device *dev,
+						      struct device_node *np)
+{
+	struct i2c_board_info board_info = {};
+	struct i2c_adapter *adapter;
+	struct i2c_client *client;
+	u32 addr;
+	int bus_num;
+
+	if (of_property_read_u32(np, "reg", &addr)) {
+		dev_err(dev, "missing 'reg' property in I2C node\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (!np->parent || !of_node_name_eq(np->parent, "i2c")) {
+		dev_err(dev, "I2C node parent is not an I²C bus\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	// bus_num = of_alias_get_id(np->parent, "i2c");
+	// if (bus_num < 0) {
+	// 	dev_err(dev, "cannot determine I2C bus number\n");
+	// 	return ERR_PTR(bus_num);
+	// }
+	/* TODO: Read bus number from device tree */
+	bus_num = 10;
+
+	adapter = i2c_get_adapter(bus_num);
+	if (!adapter)
+		return ERR_PTR(-ENODEV);
+
+	strscpy(board_info.type, "fpga-sensor-dummy", I2C_NAME_SIZE);
+	board_info.addr = addr;
+	board_info.of_node = np;
+
+	client = i2c_new_client_device(adapter, &board_info);
+	i2c_put_adapter(adapter);
+
+	return client;
+}
+
+static int primes_connect_i2c_client(struct unicam_device *unicam)
+{
+	int ret = 0;
+	struct device_node *sensor_np =
+		of_parse_phandle(unicam->pdev->dev.of_node, "sensor", 0);
+	unicam->sensor_client =
+		create_i2c_client_from_node(&unicam->pdev->dev, sensor_np);
+	if (IS_ERR(unicam->sensor_client)) {
+		dev_warn(&unicam->pdev->dev,
+			 "failed to create i2c client from node\n");
+		unicam->sensor_client = NULL;
+		ret = 1;
+	}
+	of_node_put(sensor_np);
+	return ret;
+}
+
 static int unicam_start_streaming(struct unicam_device *unicam)
 {
 	int ret;
@@ -585,8 +704,8 @@ static int unicam_start_streaming(struct unicam_device *unicam)
 		goto err_streaming;
 	}
 
-	unicam->max_data_lanes = 2;
-	unicam->active_data_lanes = unicam->max_data_lanes;
+	unicam->active_data_lanes = primes_read_mipi_tx_lanes(unicam);
+	unicam->stride = primes_read_mipi_tx_hres(unicam);
 
 	dev_info(&unicam->pdev->dev, "Running with %u data lanes\n",
 		 unicam->active_data_lanes);
@@ -600,6 +719,7 @@ static int unicam_start_streaming(struct unicam_device *unicam)
 
 	unicam->start_time = ktime_get_real_ns();
 
+	unicam->frame_started = false;
 	unicam_start_rx(unicam);
 
 	return 0;
@@ -607,7 +727,6 @@ static int unicam_start_streaming(struct unicam_device *unicam)
 error_pipeline:
 	pm_runtime_put_sync(&unicam->pdev->dev);
 err_streaming:
-
 	return ret;
 }
 
@@ -676,6 +795,12 @@ static int unicam_dma_buffer_op_submit(struct iio_dma_buffer_queue *queue,
 	struct platform_device *pdev =
 		container_of(queue->dev, struct platform_device, dev);
 	struct unicam_device *unicam = platform_get_drvdata(pdev);
+	struct list_head *cur;
+	int len = 0;
+	list_for_each(cur, &unicam->block_list) {
+		len++;
+	}
+	// printk("list_empty(&unicam->block_list)==%d len=%d\n", list_empty(&unicam->block_list), len);
 	spin_lock(&unicam->list_lock);
 	list_add_tail(&block->head, &unicam->block_list);
 	spin_unlock(&unicam->list_lock);
@@ -684,6 +809,7 @@ static int unicam_dma_buffer_op_submit(struct iio_dma_buffer_queue *queue,
 
 static void unicam_dma_buffer_op_abort(struct iio_dma_buffer_queue *queue)
 {
+	dev_info(queue->dev, "dma buffer op abort");
 }
 
 static const struct iio_dma_buffer_ops unicam_iio_dma_buffer_ops = {
@@ -718,10 +844,192 @@ static const struct iio_chan_spec unicam_iio_channels[] = {
   },
 };
 
-static const struct iio_info unicam_iio_info = {};
+struct primes_attribute {
+	const char *name;
+	u8 addr;
+	bool two_bytes;
+};
+
+static ssize_t primes_attr_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	int ret;
+	struct iio_dev_attr *iioattr =
+		container_of(attr, struct iio_dev_attr, dev_attr);
+	struct primes_attribute *pattr =
+		(struct primes_attribute *)iioattr->address;
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct platform_device *pdev = container_of(
+		indio_dev->dev.parent, struct platform_device, dev);
+	struct unicam_device *unicam = platform_get_drvdata(pdev);
+	if (!unicam->sensor_client) {
+		return -ENXIO;
+	}
+	if (pattr->two_bytes) {
+		ret = i2c_smbus_read_byte_data(unicam->sensor_client,
+					       pattr->addr)
+		      << 8;
+		if (ret < 0) {
+			dev_err(dev, "I2C read failed: %d\n", ret);
+			return ret;
+		}
+		ret |= i2c_smbus_read_byte_data(unicam->sensor_client,
+						pattr->addr + 1);
+	} else {
+		ret |= i2c_smbus_read_byte_data(unicam->sensor_client,
+						pattr->addr);
+	}
+	if (ret < 0) {
+		dev_err(dev, "I2C read failed: %d\n", ret);
+		return ret;
+	}
+	return sprintf(buf, "%d\n", ret);
+}
+
+static ssize_t primes_attr_store(struct device *dev,
+				 struct device_attribute *attr, const char *buf,
+				 size_t len)
+{
+	int ret;
+	struct iio_dev_attr *iioattr =
+		container_of(attr, struct iio_dev_attr, dev_attr);
+	struct primes_attribute *pattr =
+		(struct primes_attribute *)iioattr->address;
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct platform_device *pdev = container_of(
+		indio_dev->dev.parent, struct platform_device, dev);
+	struct unicam_device *unicam = platform_get_drvdata(pdev);
+	if (!unicam->sensor_client) {
+		return -ENXIO;
+	}
+	u16 val;
+	if (kstrtou16(buf, 10, &val))
+		return -EINVAL;
+	if (pattr->two_bytes) {
+		ret = i2c_smbus_write_byte_data(unicam->sensor_client,
+						pattr->addr, val >> 8);
+		if (ret < 0) {
+			dev_err(dev, "I2C write failed: %d\n", ret);
+			return ret;
+		}
+		ret = i2c_smbus_write_byte_data(unicam->sensor_client,
+						pattr->addr + 1, val);
+	} else {
+		ret = i2c_smbus_write_byte_data(unicam->sensor_client,
+						pattr->addr, val);
+	}
+	if (ret < 0) {
+		dev_err(dev, "I2C write failed: %d\n", ret);
+		return ret;
+	}
+	return len;
+}
+
+static const struct primes_attribute pattrs[] = {
+	[PRIMES_I2C_REG_C_TEST_PATTERN_CONFIG] = { .addr = PRIMES_I2C_REG_C_TEST_PATTERN_CONFIG,
+						   .two_bytes = 0 },
+	[PRIMES_I2C_REG_C_MIPI_TX_VC] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_VC,
+					  .two_bytes = 0 },
+	[PRIMES_I2C_REG_C_MIPI_TX_TYPE] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_TYPE,
+					    .two_bytes = 0 },
+	[PRIMES_I2C_REG_C_MIPI_TX_LANES] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_LANES,
+					     .two_bytes = 0 },
+	[PRIMES_I2C_REG_C_MIPI_TX_FRAME_MODE] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_FRAME_MODE,
+						  .two_bytes = 0 },
+	[PRIMES_I2C_REG_C_MIPI_TX_HRES] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_HRES,
+					    .two_bytes = 1 },
+	[PRIMES_I2C_REG_C_MIPI_TX_ULPS_ENTER] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_ULPS_ENTER,
+						  .two_bytes = 0 },
+	[PRIMES_I2C_REG_C_MIPI_TX_ULPS_EXIT] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_ULPS_EXIT,
+						 .two_bytes = 1 },
+	[PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_ENTER] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_ENTER,
+						      .two_bytes = 0 },
+	[PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_EXIT] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_EXIT,
+						     .two_bytes = 0 },
+	[PRIMES_I2C_REG_C_MIPI_HSA] = { .addr = PRIMES_I2C_REG_C_MIPI_HSA,
+					.two_bytes = 1 },
+	[PRIMES_I2C_REG_C_MIPI_HBP] = { .addr = PRIMES_I2C_REG_C_MIPI_HBP,
+					.two_bytes = 1 },
+	[PRIMES_I2C_REG_C_MIPI_HACT] = { .addr = PRIMES_I2C_REG_C_MIPI_HACT,
+					 .two_bytes = 1 },
+	[PRIMES_I2C_REG_C_MIPI_HFP] = { .addr = PRIMES_I2C_REG_C_MIPI_HFP,
+					.two_bytes = 1 },
+	[PRIMES_I2C_REG_C_MIPI_VSA] = { .addr = PRIMES_I2C_REG_C_MIPI_VSA,
+					.two_bytes = 1 },
+	[PRIMES_I2C_REG_C_MIPI_VBP] = { .addr = PRIMES_I2C_REG_C_MIPI_VBP,
+					.two_bytes = 1 },
+	[PRIMES_I2C_REG_C_MIPI_VACT] = { .addr = PRIMES_I2C_REG_C_MIPI_VACT,
+					 .two_bytes = 1 },
+	[PRIMES_I2C_REG_C_MIPI_VFP] = { .addr = PRIMES_I2C_REG_C_MIPI_VFP,
+					.two_bytes = 1 },
+};
+
+#define PRIMES_DEVICE_ATTR(NAME)                             \
+	static IIO_DEVICE_ATTR(NAME, 0644, primes_attr_show, \
+			       primes_attr_store,            \
+			       (intptr_t)&pattrs[PRIMES_I2C_REG_##NAME]);
+
+PRIMES_DEVICE_ATTR(C_TEST_PATTERN_CONFIG)
+PRIMES_DEVICE_ATTR(C_MIPI_TX_VC)
+PRIMES_DEVICE_ATTR(C_MIPI_TX_TYPE)
+PRIMES_DEVICE_ATTR(C_MIPI_TX_LANES)
+PRIMES_DEVICE_ATTR(C_MIPI_TX_FRAME_MODE)
+PRIMES_DEVICE_ATTR(C_MIPI_TX_HRES)
+PRIMES_DEVICE_ATTR(C_MIPI_TX_ULPS_ENTER)
+PRIMES_DEVICE_ATTR(C_MIPI_TX_ULPS_EXIT)
+PRIMES_DEVICE_ATTR(C_MIPI_TX_ULPS_CLK_ENTER)
+PRIMES_DEVICE_ATTR(C_MIPI_TX_ULPS_CLK_EXIT)
+PRIMES_DEVICE_ATTR(C_MIPI_HSA)
+PRIMES_DEVICE_ATTR(C_MIPI_HBP)
+PRIMES_DEVICE_ATTR(C_MIPI_HACT)
+PRIMES_DEVICE_ATTR(C_MIPI_HFP)
+PRIMES_DEVICE_ATTR(C_MIPI_VSA)
+PRIMES_DEVICE_ATTR(C_MIPI_VBP)
+PRIMES_DEVICE_ATTR(C_MIPI_VACT)
+PRIMES_DEVICE_ATTR(C_MIPI_VFP)
+
+static struct attribute *my_attributes[] = {
+	&iio_dev_attr_C_TEST_PATTERN_CONFIG.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_TX_VC.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_TX_TYPE.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_TX_LANES.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_TX_FRAME_MODE.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_TX_HRES.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_TX_ULPS_ENTER.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_TX_ULPS_EXIT.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_TX_ULPS_CLK_ENTER.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_TX_ULPS_CLK_EXIT.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_HSA.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_HBP.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_HACT.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_HFP.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_VSA.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_VBP.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_VACT.dev_attr.attr,
+	&iio_dev_attr_C_MIPI_VFP.dev_attr.attr,
+	NULL
+};
+
+static const struct attribute_group my_attribute_group = {
+	.attrs = my_attributes,
+};
+
+static const struct iio_info unicam_iio_info = {
+	.attrs = &my_attribute_group,
+};
+
+static DEFINE_MUTEX(primes_iio_dev_mx);
+static bool primes_iio_device_in_use = false;
 
 static int unicam_buffer_postenable(struct iio_dev *indio_dev)
 {
+	mutex_lock(&primes_iio_dev_mx);
+	if (primes_iio_device_in_use) {
+		mutex_unlock(&primes_iio_dev_mx);
+		return -EBUSY;
+	}
+	primes_iio_device_in_use = true;
+	mutex_unlock(&primes_iio_dev_mx);
 	int res;
 	struct platform_device *pdev;
 	struct unicam_device *unicam;
@@ -730,7 +1038,6 @@ static int unicam_buffer_postenable(struct iio_dev *indio_dev)
 	unicam->cur_block = NULL;
 	unicam->next_block = NULL;
 	res = unicam_start_streaming(unicam);
-	unicam_log_status(unicam);
 	return res;
 }
 
@@ -742,6 +1049,10 @@ static int unicam_buffer_predisable(struct iio_dev *indio_dev)
 	unicam_log_status(unicam);
 	printk("predisable\n");
 	unicam_stop_streaming(unicam);
+
+	mutex_lock(&primes_iio_dev_mx);
+	primes_iio_device_in_use = false;
+	mutex_unlock(&primes_iio_dev_mx);
 	return 0;
 }
 
@@ -766,8 +1077,9 @@ static int unicam_probe(struct platform_device *pdev)
 	dev_info(dev, "unicam_probe\n");
 
 	unicam = kzalloc(sizeof(*unicam), GFP_KERNEL);
-	if (!unicam)
+	if (!unicam) {
 		return -ENOMEM;
+	}
 
 	unicam->pdev = pdev;
 	platform_set_drvdata(pdev, unicam);
@@ -783,6 +1095,11 @@ static int unicam_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
+
+	if (primes_connect_i2c_client(unicam)) {
+		goto err_unicam_put;
+		return -EBUSY;
+	}
 
 	/*
          * Adopt the current setting of the module parameter, and check if
@@ -876,6 +1193,10 @@ static int unicam_probe(struct platform_device *pdev)
 	return 0;
 
 err_unicam_put:
+	if (unicam->sensor_client) {
+		i2c_unregister_device(unicam->sensor_client);
+	}
+
 	kfree(unicam);
 
 	return ret;
@@ -886,6 +1207,7 @@ static void unicam_remove(struct platform_device *pdev)
 	dev_info(&pdev->dev, "unicam_remove\n");
 	struct unicam_device *unicam = platform_get_drvdata(pdev);
 	if (unicam) {
+		pm_runtime_disable(&pdev->dev);
 		unicam_disable(unicam);
 		usleep_range(1000, 2000);
 		if (unicam->indio_dev) {
@@ -901,6 +1223,9 @@ static void unicam_remove(struct platform_device *pdev)
 			dma_free_coherent(&pdev->dev, unicam->dummy_dma_size,
 					  unicam->dummy_dma_vaddr,
 					  unicam->dummy_dma_addr);
+		}
+		if (unicam->sensor_client) {
+			i2c_unregister_device(unicam->sensor_client);
 		}
 		kfree(unicam);
 	}
@@ -920,10 +1245,12 @@ static int unicam_runtime_resume(struct device *dev)
 		dev_err(dev, "Failed to enable VPU clock: %d\n", ret);
 		goto err_vpu_clock;
 	}
-	ret = clk_set_rate(unicam->clock, 100 * 1000 * 1000);
-	if (ret) {
-		dev_err(dev, "failed to set up CSI clock\n");
-		goto err_vpu_prepare;
+	if (clk_get_rate(unicam->clock) != 100 * 1000 * 1000) {
+		ret = clk_set_rate(unicam->clock, 100 * 1000 * 1000);
+		if (ret) {
+			dev_err(dev, "failed to set up CSI clock\n");
+			goto err_vpu_prepare;
+		}
 	}
 	ret = clk_prepare_enable(unicam->clock);
 	if (ret) {
