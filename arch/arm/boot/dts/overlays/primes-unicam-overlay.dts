@@ -2,12 +2,16 @@
 /plugin/;
 
 / {
-    fragment@0 {
+    fragment@1 {
         target-path = "/soc";
         __overlay__ {
             csi@7e801000 {
                 compatible = "primes,bcm2835-unicam-primes-generic-fpga";
                 status = "okay";
+                sensor {
+                    busnum = <10>;
+                    reg = <0x51>;
+                };
             };
         };
     };

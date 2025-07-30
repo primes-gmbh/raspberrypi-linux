@@ -100,7 +100,8 @@ struct unicam_device {
          * bus.mipi_csi1.strobe for CCP2.
          */
 	unsigned int active_data_lanes;
-	u16 stride;
+	u16 hres;
+	u16 vres;
 
 	bool frame_started;
 
@@ -212,8 +213,6 @@ static void unicam_schedule_next_block(struct unicam_device *unicam)
 	}
 	unicam_wr_dma_addr(unicam, phys_addr, size);
 	unicam->next_block = block;
-	// printk("scheduling next_block: phys_addr=%llu size=%zu\n", phys_addr,
-	//        size);
 }
 
 static void unicam_schedule_dummy_block(struct unicam_device *unicam)
@@ -256,8 +255,6 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	if (!(sta & (UNICAM_IS | UNICAM_PI0))) {
 		return IRQ_HANDLED;
 	}
-
-	// spin_lock(&unicam->list_lock);
 
 	/*
 	 * Look for either the Frame End interrupt or the Packet Capture status
@@ -320,27 +317,7 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 
 	static u64 seq = 0, last_seq = 0;
 
-	// if (scheduled_dummy_buffer) {
-	// 	printk("============== %4llu ==============\n", seq);
-	// 	printk("dummy buffer is left scheduled after %llu frames, reason: %s\n",
-	// 	       seq - last_seq, reason);
-	// 	if (ista & UNICAM_FEI) {
-	// 		printk("ista & UNICAM_FEI\n");
-	// 	}
-	// 	if (sta & UNICAM_PI0) {
-	// 		printk("sta & UNICAM_PI0\n");
-	// 	}
-	// 	if (ista & UNICAM_FSI) {
-	// 		printk("ista & UNICAM_FSI\n");
-	// 	}
-	// 	if (ista & UNICAM_LCI) {
-	// 		printk("ista & UNICAM_LCI\n");
-	// 	}
-	// 	last_seq = seq;
-	// }
 	seq++;
-
-	// spin_unlock(&unicam->list_lock);
 
 	return IRQ_HANDLED;
 }
@@ -373,16 +350,15 @@ static void unicam_start_rx(struct unicam_device *unicam)
 
 	/* It seems like line_int_freq should be set to something high enough to avoid certain linux
 	 * errors such as CPU stalls or raspi frimware errors */
-	int line_int_freq =
-		(unicam->queue[0].fileio.block_size / unicam->stride) >> 2;
+	int line_int_freq = unicam->vres >> 2;
 	if (line_int_freq < 128) {
 		line_int_freq = 128;
 	}
 	// int line_int_freq = 1;
 	dev_info(
 		&unicam->pdev->dev,
-		"stride size: %d bytes, buffer size: %zu bytes -> setting line_int_freq to %d\n",
-		unicam->stride, unicam->queue[0].fileio.block_size,
+		"stride size: %d bytes, buffer_size: %zu bytes -> setting line_int_freq to %d\n",
+		unicam->vres, unicam->queue[0].fileio.block_size,
 		line_int_freq);
 
 	/* Enable lane clocks */
@@ -510,7 +486,7 @@ static void unicam_start_rx(struct unicam_device *unicam)
 	//    dev->node[IMAGE_PAD].v_fmt.fmt.pix.bytesperline);
 	// size = dev->node[IMAGE_PAD].v_fmt.fmt.pix.sizeimage;
 	// reg_write(dev, UNICAM_IBLS, ALIGN(8, BPL_ALIGNMENT));
-	reg_write(unicam, UNICAM_IBLS, unicam->stride);
+	reg_write(unicam, UNICAM_IBLS, unicam->hres);
 	// unicam_wr_dma_addr(unicam, unicam->dummy_dma_addr, 0);
 	unicam_schedule_next_block(unicam);
 	unicam_set_packing_config(unicam);
@@ -548,10 +524,10 @@ static void unicam_disable(struct unicam_device *unicam)
 	reg_write(unicam, UNICAM_DAT0, 0);
 	reg_write(unicam, UNICAM_DAT1, 0);
 
-	// if (unicam->max_data_lanes > 2) {
-	reg_write(unicam, UNICAM_DAT2, 0);
-	reg_write(unicam, UNICAM_DAT3, 0);
-	// }
+	if (unicam->active_data_lanes > 2) {
+		reg_write(unicam, UNICAM_DAT2, 0);
+		reg_write(unicam, UNICAM_DAT3, 0);
+	}
 
 	/* Peripheral reset */
 	reg_write_field(unicam, UNICAM_CTRL, 1, UNICAM_CPR);
@@ -635,6 +611,25 @@ static u16 primes_read_mipi_tx_hres(struct unicam_device *unicam)
 	return res;
 }
 
+static u16 primes_read_mipi_vact(struct unicam_device *unicam)
+{
+	u16 res = 4096;
+	if (unicam->sensor_client) {
+		s32 data_0 = i2c_smbus_read_byte_data(
+			unicam->sensor_client, PRIMES_I2C_REG_C_MIPI_VACT);
+		s32 data_1 = i2c_smbus_read_byte_data(
+			unicam->sensor_client,
+			PRIMES_I2C_REG_C_MIPI_VACT + 1);
+		if (data_0 < 0 || data_1 < 0) {
+			dev_warn(
+				&unicam->pdev->dev,
+				"Could not read C_MIPI_VACT from FPGA, using default of 4096");
+		}
+		res = data_0 << 8 | data_1;
+	}
+	return res;
+}
+
 static struct i2c_client *create_i2c_client_from_node(struct device *dev,
 						      struct device_node *np)
 {
@@ -642,31 +637,24 @@ static struct i2c_client *create_i2c_client_from_node(struct device *dev,
 	struct i2c_adapter *adapter;
 	struct i2c_client *client;
 	u32 addr;
-	int bus_num;
+	u32 busnum;
 
 	if (of_property_read_u32(np, "reg", &addr)) {
 		dev_err(dev, "missing 'reg' property in I2C node\n");
 		return ERR_PTR(-EINVAL);
 	}
 
-	if (!np->parent || !of_node_name_eq(np->parent, "i2c")) {
-		dev_err(dev, "I2C node parent is not an I²C bus\n");
+	if (of_property_read_u32(np, "busnum", &busnum)) {
+		dev_err(dev, "missing 'busnum' property in I2C node\n");
 		return ERR_PTR(-EINVAL);
 	}
 
-	// bus_num = of_alias_get_id(np->parent, "i2c");
-	// if (bus_num < 0) {
-	// 	dev_err(dev, "cannot determine I2C bus number\n");
-	// 	return ERR_PTR(bus_num);
-	// }
-	/* TODO: Read bus number from device tree */
-	bus_num = 10;
-
-	adapter = i2c_get_adapter(bus_num);
-	if (!adapter)
+	adapter = i2c_get_adapter(busnum);
+	if (!adapter) {
 		return ERR_PTR(-ENODEV);
+	}
 
-	strscpy(board_info.type, "fpga-sensor-dummy", I2C_NAME_SIZE);
+	strscpy(board_info.type, "primes-sensor", I2C_NAME_SIZE);
 	board_info.addr = addr;
 	board_info.of_node = np;
 
@@ -680,7 +668,12 @@ static int primes_connect_i2c_client(struct unicam_device *unicam)
 {
 	int ret = 0;
 	struct device_node *sensor_np =
-		of_parse_phandle(unicam->pdev->dev.of_node, "sensor", 0);
+		of_get_child_by_name(unicam->pdev->dev.of_node, "sensor");
+	if (!sensor_np) {
+		dev_err(&unicam->pdev->dev,
+			"missing 'sensor' property in CSI node\n");
+		return -EINVAL;
+	}
 	unicam->sensor_client =
 		create_i2c_client_from_node(&unicam->pdev->dev, sensor_np);
 	if (IS_ERR(unicam->sensor_client)) {
@@ -705,7 +698,8 @@ static int unicam_start_streaming(struct unicam_device *unicam)
 	}
 
 	unicam->active_data_lanes = primes_read_mipi_tx_lanes(unicam);
-	unicam->stride = primes_read_mipi_tx_hres(unicam);
+	unicam->hres = primes_read_mipi_tx_hres(unicam);
+	unicam->vres = primes_read_mipi_vact(unicam);
 
 	dev_info(&unicam->pdev->dev, "Running with %u data lanes\n",
 		 unicam->active_data_lanes);
@@ -796,11 +790,6 @@ static int unicam_dma_buffer_op_submit(struct iio_dma_buffer_queue *queue,
 		container_of(queue->dev, struct platform_device, dev);
 	struct unicam_device *unicam = platform_get_drvdata(pdev);
 	struct list_head *cur;
-	int len = 0;
-	list_for_each(cur, &unicam->block_list) {
-		len++;
-	}
-	// printk("list_empty(&unicam->block_list)==%d len=%d\n", list_empty(&unicam->block_list), len);
 	spin_lock(&unicam->list_lock);
 	list_add_tail(&block->head, &unicam->block_list);
 	spin_unlock(&unicam->list_lock);
@@ -1035,6 +1024,9 @@ static int unicam_buffer_postenable(struct iio_dev *indio_dev)
 	struct unicam_device *unicam;
 	pdev = container_of(indio_dev->dev.parent, struct platform_device, dev);
 	unicam = platform_get_drvdata(pdev);
+	if (!unicam->sensor_client) {
+		return -ENOSR;
+	}
 	unicam->cur_block = NULL;
 	unicam->next_block = NULL;
 	res = unicam_start_streaming(unicam);
@@ -1092,13 +1084,14 @@ static int unicam_probe(struct platform_device *pdev)
 	pdev->dev.dma_parms = devm_kzalloc(
 		&pdev->dev, sizeof(*pdev->dev.dma_parms), GFP_KERNEL);
 	if (!pdev->dev.dma_parms) {
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_unicam_put;
 	}
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
 
 	if (primes_connect_i2c_client(unicam)) {
+		ret = -EBUSY;
 		goto err_unicam_put;
-		return -EBUSY;
 	}
 
 	/*
@@ -1197,6 +1190,7 @@ err_unicam_put:
 		i2c_unregister_device(unicam->sensor_client);
 	}
 
+	platform_set_drvdata(pdev, NULL);
 	kfree(unicam);
 
 	return ret;
