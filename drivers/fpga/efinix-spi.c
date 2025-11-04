@@ -104,10 +104,7 @@ static int efinix_fpga_write(struct fpga_manager *mgr, const char *buf,
 	const char *fw_data_end = fw_data + count;
 	int ret = 0;
 	size_t line = 1;
-	int iteration = 0;
 	while (fw_data < fw_data_end - 2) {
-		// dev_info(&efx->spi->dev, "iteration no. %d\n", iteration);
-		iteration++;
 		if (*fw_data != '\n') {
 			u8 upper = Hex2Int(fw_data[0]);
 			if (upper == -1) {
@@ -146,7 +143,6 @@ static int efinix_fpga_write(struct fpga_manager *mgr, const char *buf,
 			}
 			fw_data += 2;
 		}
-		// msleep(1);
 		fw_data++;
 		line++;
 	}
