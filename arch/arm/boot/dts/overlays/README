@@ -266,7 +266,8 @@ Params:
 
         eth_max_speed           Set the maximum speed a link is allowed
                                 to negotiate. Legal values are 10, 100 and
-                                1000 (default 1000). Pi3B+ only.
+                                1000 (default set by the platform). Pi3B+,
+                                Pi4, Pi400, CM4, Pi5, Pi500, and CM5 only.
 
         fan_temp0               Temperature threshold (in millicelcius) for
                                 1st cooling level (default 50000). Pi5 only.
@@ -2420,15 +2421,39 @@ Name:   i2c-sensor
 Info:   Adds support for a number of I2C barometric pressure, temperature,
         light level and chemical sensors on i2c_arm
 Load:   dtoverlay=i2c-sensor,<param>=<val>
-Params: addr                    Set the address for the ADS7828, ADS7830,
-                                ADT7410, AS73211, AS7331, BH1750, BME280,
-                                BME680, BMP280, BMP380, CCS811, DS1621,
-                                HDC100X, HDC3020, JC42, LM75, MCP980x,
+Params: addr                    Set the address for the AD799X, ADS7828,
+                                ADS7830, ADT7410, AS73211, AS7331, BH1750,
+                                BME280, BME680, BMP280, BMP380, BMP58x, CCS811,
+                                DS1621, HDC100X, HDC3020, JC42, LM75, MCP980x,
                                 MPU6050, MPU9250, MS5637, MS5803, MS5805,
-                                MS5837, MS8607, SHT3x or TMP102
+                                MS5837, MS8607, SHT3x, TMP102 or VEML6030.
 
         i2c-bus                 Supports all the standard I2C bus selection
                                 parameters - see "dtoverlay -h i2c-bus"
+
+        ad7991                  Select the Analog Devices AD7991 ADC
+                                Valid addresses 0x28-0x29, default 0x28
+
+        ad7992                  Select the Analog Devices AD7992 ADC
+                                Valid addresses 0x20-0x24, default 0x20
+
+        ad7993                  Select the Analog Devices AD7993 ADC
+                                Valid addresses 0x20-0x24, default 0x20
+
+        ad7994                  Select the Analog Devices AD7994 ADC
+                                Valid addresses 0x20-0x24, default 0x20
+
+        ad7995                  Select the Analog Devices AD7995 ADC
+                                Valid addresses 0x28-0x29, default 0x28
+
+        ad7997                  Select the Analog Devices AD7997 ADC
+                                Valid addresses 0x20-0x24, default 0x20
+
+        ad7998                  Select the Analog Devices AD7998 ADC
+                                Valid addresses 0x20-0x24, default 0x20
+
+        ad7999                  Select the Analog Devices AD7999 ADC
+                                Valid address 0x29 (the default)
 
         ads7828                 Select the TI ADS7828 50kHz 8-channel 12bit ADC
                                 Valid addresses 0x48-0x4b, default 0x48
@@ -2441,6 +2466,9 @@ Params: addr                    Set the address for the ADS7828, ADS7830,
                                 Valid address 0x48-0x4b, default 0x48
 
         adxl345                 Select the Analog Devices ADXL345 3-axis
+                                accelerometer
+
+        adxl355                 Select the Analog Devices ADXL355 3-axis
                                 accelerometer
 
         aht10                   Select the Aosong AHT10 temperature and humidity
@@ -2473,6 +2501,10 @@ Params: addr                    Set the address for the ADS7828, ADS7830,
 
         bmp380                  Select the Bosch Sensortronic BMP380
                                 Valid addresses 0x76-0x77, default 0x76
+
+        bmp58x                  Select the Bosch Sensortronic BMP580, BMP581,
+                                or BMP585
+                                Valid addresses 0x46-0x47, default 0x46
 
         bno055                  Select the Bosch Sensortronic BNO055 IMU
                                 Valid address 0x28-0x29, default 0x29
@@ -2568,6 +2600,8 @@ Params: addr                    Set the address for the ADS7828, ADS7830,
                                 measurement in uOhms.  (ina238 only, disabled
                                 by default)
 
+        scd4x                   Select the Sensirion SCD40/41 CO2 sensors.
+
         sht3x                   Select the Sensirion SHT3x temperature and
                                 humidity sensors. Valid addresses 0x44-0x45,
                                 default 0x44
@@ -2595,8 +2629,13 @@ Params: addr                    Set the address for the ADS7828, ADS7830,
         tmp102                  Select the Texas Instruments TMP102 temp sensor
                                 Valid addresses 0x48-0x4b, default 0x48
 
+        tmp117                  Select the Texas Instruments TMP117 temp sensor
+                                Valid addresses 0x48-0x4b, default 0x48
+
         tsl4531                 Select the AMS TSL4531 digital ambient light
                                 sensor
+
+        veml6030                Select the Vishay VEML6030 ambient light sensor
 
         veml6040                Select the Vishay VEML6040 RGBW light sensor
 
@@ -3718,6 +3757,10 @@ Params: rotation                Mounting rotation of the camera sensor (0 or
         clk-continuous          Switch to continuous mode on the CSI clock lane,
                                 which increases the maximum frame rate slightly.
                                 Appears not to work on Pi3.
+        trigger-mode            Enable external trigger mode (0 = normal,
+                                1 = triggered). In this mode, the sensor outputs
+                                a frame only when triggered by a rising edge
+                                on the FSIN input pin.
 
 
 Name:   papirus
@@ -4457,6 +4500,18 @@ Params: poe_fan_temp0           Temperature (in millicelcius) at which the fan
                                 the firmware.
 
 
+Name:   rpi-power-hat-b
+Info:   Raspberry Pi Power HAT Bottom
+Load:   dtoverlay=rpi-power-hat-b
+Params: <None>
+
+
+Name:   rpi-power-hat-t
+Info:   Raspberry Pi Power HAT Top
+Load:   dtoverlay=rpi-power-hat-t
+Params: <None>
+
+
 Name:   rpi-proto
 Info:   This overlay has been renamed to proto-codec.
 Load:   <Deprecated>
@@ -4543,7 +4598,7 @@ Load:   <Deprecated>
 
 Name:   sc16is752-spi1
 Info:   This overlay is now deprecated. Use
-        "dtoverlay=sc16is75x-spi,sc16is752,spi1-0,..." instead.
+        "dtoverlay=sc16is75x-spi,sc16is752,spi1-1cs,spi1-0,..." instead.
 Load:   <Deprecated>
 
 
@@ -4558,6 +4613,8 @@ Params: sc16is750               Device is a SC16IS750 UART (default on)
                                 (boolean, required)
         int_pin                 GPIO used for IRQ (default 24)
         xtal                    On-board crystal frequency (default 14745600)
+        spi1-1cs                A special case to support sc16is752-spi1. Not
+                                intended for general use.
 
 
 Name:   sdhost
@@ -5593,6 +5650,7 @@ Params: sizex                   Touchscreen size x (default 720)
         invy                    Touchscreen inverted y axis
         swapxy                  Touchscreen swapped x y axis
         disable_touch           Disables the touch screen overlay driver
+        rotation                Display rotation {0,90,180,270} (default 0)
         dsi0                    Use DSI0 and i2c_csi_dsi0 (rather than
                                 the default DSI1 and i2c_csi_dsi).
 
@@ -5922,8 +5980,10 @@ Params: brightness              Set the initial brightness for the LEDs. The
                                 a single byte to offset 0 of the device. Note
                                 that brightness is a multiplier for the pixel
                                 values, and only white pixels can reach the
-                                maximum visible brightness. (range 0-255,
-                                default 255)
+                                maximum visible brightness. N.B. Setting
+                                brightness to 0 acctivates pass-through mode,
+                                disabling all brightness and gamma processing.
+                                (range 0-255, default 255)
         dev_name                The name for the /dev/ device entry. Note that
                                 if the name includes '%d' it will be replaced
                                 by the instance number. (default 'leds%d')
@@ -5937,16 +5997,17 @@ Params: brightness              Set the initial brightness for the LEDs. The
 Troubleshooting
 ===============
 
-If you are experiencing problems that you think are DT-related, enable DT
-diagnostic output by adding this to /boot/config.txt:
+If you are experiencing problems that you think are DT-related, first check for
+error messages from the firmware by running:
+
+    sudo vclog -m
+
+To see more details about the changes to the Device Tree, add the following to
+/boot/firmware/config.txt:
 
     dtdebug=on
 
-and rebooting. Then run:
-
-    sudo vcdbg log msg
-
-and look for relevant messages.
+and reboot, then use vclog as above.
 
 Further reading
 ===============
@@ -5954,4 +6015,4 @@ Further reading
 This is only meant to be a quick introduction to the subject of Device Tree on
 Raspberry Pi. There is a more complete explanation here:
 
-http://www.raspberrypi.org/documentation/configuration/device-tree.md
+https://www.raspberrypi.com/documentation/computers/configuration.html#device-trees-overlays-and-parameters
