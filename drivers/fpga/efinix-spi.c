@@ -26,9 +26,7 @@ struct efinix_fpga_mgr {
 	struct spi_device *spi;
 	struct gpio_desc *cdone;
 	struct gpio_desc *creset;
-	struct gpio_desc *ss;
 	struct fpga_manager *mgr;
-	struct fw_upload *fwl;
 };
 
 static int efinix_fpga_write_init(struct fpga_manager *mgr,
