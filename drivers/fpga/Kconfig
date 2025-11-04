@@ -83,6 +83,13 @@ config FPGA_MGR_XILINX_SPI
 	  FPGA manager driver support for Xilinx FPGA configuration
 	  over slave serial interface.
 
+config FPGA_MGR_EFINIX_SPI
+	tristate "Efinix configuration over passive SPI"
+	depends on SPI
+	help
+	  FPGA manager driver support for Efinix FPGA configuration
+	  over passive SPI.
+
 config FPGA_MGR_ICE40_SPI
 	tristate "Lattice iCE40 SPI"
 	depends on OF && SPI

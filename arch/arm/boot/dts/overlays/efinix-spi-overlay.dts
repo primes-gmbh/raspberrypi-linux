@@ -1,0 +1,22 @@
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+  fragment@0 {
+    target = <&spi0>;
+    __overlay__ {
+      status = "okay";
+      fpga_mgr: fpga-mgr@0 {
+        compatible = "efinix,fpga-passive-spi";
+        reg = <0>;
+        spi-max-frequency = <25000000>;
+        spi-cpol;
+        spi-cpha;
+        cdone-gpios  = <&gpio 5 GPIO_ACTIVE_HIGH>;
+        creset-gpios = <&gpio 6 GPIO_ACTIVE_HIGH>;
+      };
+    };
+  };
+};
