@@ -266,11 +266,6 @@ static int efinix_spi_probe(struct spi_device *spi)
 		return dev_err_probe(&efx->spi->dev, PTR_ERR(efx->creset),
 				     "Failed to get CRESET gpio\n");
 	}
-	efx->ss = devm_gpiod_get(&spi->dev, "ss", GPIOD_OUT_HIGH);
-	if (IS_ERR(efx->ss)) {
-		return dev_err_probe(&efx->spi->dev, PTR_ERR(efx->ss),
-				     "Failed to get SS gpio\n");
-	}
 	info.name = "Efinix FPGA Manager";
 	info.mops = &efinix_fpga_ops;
 	info.priv = efx;
