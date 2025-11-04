@@ -1067,6 +1067,33 @@ static int unicam_probe(struct platform_device *pdev)
 	dev = &pdev->dev;
 	dev_info(dev, "unicam_probe\n");
 
+	if (!do_not_flash_fpga) {
+		struct device_node *mgr_np;
+		struct fpga_manager *mgr;
+		mgr_np = of_parse_phandle(dev->of_node, "fpga-mgr", 0);
+		if (!mgr_np) {
+			dev_warn(dev, "no fpga-mgr property found\n");
+			return -ENODEV;
+		}
+
+		mgr = of_fpga_mgr_get(mgr_np);
+		of_node_put(mgr_np);
+		if (IS_ERR(mgr)) {
+			dev_err(dev, "failed to get FPGA manager: %pe\n", mgr);
+			return -EPROBE_DEFER;
+		}
+
+		struct fpga_image_info info = { 0 };
+		info.dev = dev;
+		info.firmware_name = "efinix-t120.hex";
+		ret = fpga_mgr_load(mgr, &info);
+		fpga_mgr_put(mgr);
+		if (ret) {
+			dev_err(dev, "failed to program FPGA");
+			return ret;
+		}
+	}
+
 	unicam = kzalloc(sizeof(*unicam), GFP_KERNEL);
 	if (!unicam) {
 		return -ENOMEM;
@@ -1087,33 +1114,6 @@ static int unicam_probe(struct platform_device *pdev)
 		goto err_unicam_put;
 	}
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
-
-	if (!do_not_flash_fpga) {
-		struct device_node *mgr_np;
-		struct fpga_manager *mgr;
-		mgr_np = of_parse_phandle(dev->of_node, "fpga-mgr", 0);
-		if (!mgr_np) {
-			dev_warn(dev, "no fpga-mgr property found\n");
-			return -ENODEV;
-		}
-
-		mgr = of_fpga_mgr_get(mgr_np);
-		of_node_put(mgr_np);
-		if (IS_ERR(mgr)) {
-			dev_err(dev, "failed to get FPGA manager: %pe\n", mgr);
-			return PTR_ERR(mgr);
-		}
-
-		struct fpga_image_info info = { 0 };
-		info.dev = dev;
-		info.firmware_name = "efinix-t120.hex";
-		ret = fpga_mgr_load(mgr, &info);
-		fpga_mgr_put(mgr);
-		if (ret) {
-			dev_err(dev, "failed to program FPGA");
-			return ret;
-		}
-	}
 
 	if (primes_connect_i2c_client(unicam)) {
 		ret = -EBUSY;
