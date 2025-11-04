@@ -1,4 +1,5 @@
 #include "linux/drbd.h"
+#include "linux/fpga/fpga-mgr.h"
 #include <linux/dma-buf.h>
 #include <linux/kernel.h>
 #include "linux/mod_devicetable.h"
@@ -34,6 +35,8 @@
 #include <linux/of.h>
 #include <linux/iio/sysfs.h>
 #include <linux/i2c.h>
+
+#include <linux/fpga/fpga-region.h>
 
 // #include "bcm2835-iio-dma-buffer.h"
 #include "vc4-regs-unicam.h"
@@ -314,11 +317,6 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	} else {
 		reason = "FSI and FEI at the same time";
 	}
-
-	static u64 seq = 0, last_seq = 0;
-
-	seq++;
-
 	return IRQ_HANDLED;
 }
 
@@ -618,8 +616,7 @@ static u16 primes_read_mipi_vact(struct unicam_device *unicam)
 		s32 data_0 = i2c_smbus_read_byte_data(
 			unicam->sensor_client, PRIMES_I2C_REG_C_MIPI_VACT);
 		s32 data_1 = i2c_smbus_read_byte_data(
-			unicam->sensor_client,
-			PRIMES_I2C_REG_C_MIPI_VACT + 1);
+			unicam->sensor_client, PRIMES_I2C_REG_C_MIPI_VACT + 1);
 		if (data_0 < 0 || data_1 < 0) {
 			dev_warn(
 				&unicam->pdev->dev,
@@ -789,7 +786,6 @@ static int unicam_dma_buffer_op_submit(struct iio_dma_buffer_queue *queue,
 	struct platform_device *pdev =
 		container_of(queue->dev, struct platform_device, dev);
 	struct unicam_device *unicam = platform_get_drvdata(pdev);
-	struct list_head *cur;
 	spin_lock(&unicam->list_lock);
 	list_add_tail(&block->head, &unicam->block_list);
 	spin_unlock(&unicam->list_lock);
@@ -1059,6 +1055,9 @@ struct iio_buffer_setup_ops unicam_buffer_setup_ops = {
 	.postdisable = unicam_buffer_postdisable,
 };
 
+static int do_not_flash_fpga = 0;
+module_param(do_not_flash_fpga, int, 0644);
+
 static int unicam_probe(struct platform_device *pdev)
 {
 	struct device *dev;
@@ -1088,6 +1087,33 @@ static int unicam_probe(struct platform_device *pdev)
 		goto err_unicam_put;
 	}
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
+
+	if (!do_not_flash_fpga) {
+		struct device_node *mgr_np;
+		struct fpga_manager *mgr;
+		mgr_np = of_parse_phandle(dev->of_node, "fpga-mgr", 0);
+		if (!mgr_np) {
+			dev_warn(dev, "no fpga-mgr property found\n");
+			return -ENODEV;
+		}
+
+		mgr = of_fpga_mgr_get(mgr_np);
+		of_node_put(mgr_np);
+		if (IS_ERR(mgr)) {
+			dev_err(dev, "failed to get FPGA manager: %pe\n", mgr);
+			return PTR_ERR(mgr);
+		}
+
+		struct fpga_image_info info = { 0 };
+		info.dev = dev;
+		info.firmware_name = "efinix-t120.hex";
+		ret = fpga_mgr_load(mgr, &info);
+		fpga_mgr_put(mgr);
+		if (ret) {
+			dev_err(dev, "failed to program FPGA");
+			return ret;
+		}
+	}
 
 	if (primes_connect_i2c_client(unicam)) {
 		ret = -EBUSY;
