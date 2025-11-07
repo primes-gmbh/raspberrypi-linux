@@ -10,7 +10,7 @@
                 status = "okay";
                 fpga-mgr = <&fpga_mgr>;
                 sensor {
-                    busnum = <0x0a>;
+                    busnum = <0x00>;
                     reg = <0x41>;
                 };
             };
