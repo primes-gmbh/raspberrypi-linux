@@ -2144,12 +2144,12 @@ static int __init apparmor_nf_ip_init(void)
 __initcall(apparmor_nf_ip_init);
 #endif
 
-static char nulldfa_src[] __aligned(8) = {
+static char nulldfa_src[] = {
 	#include "nulldfa.in"
 };
 static struct aa_dfa *nulldfa;
 
-static char stacksplitdfa_src[] __aligned(8) = {
+static char stacksplitdfa_src[] = {
 	#include "stacksplitdfa.in"
 };
 struct aa_dfa *stacksplitdfa;

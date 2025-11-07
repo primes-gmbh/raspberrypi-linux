@@ -143,10 +143,6 @@ static efi_status_t mm_communicate(u8 *comm_buf, size_t payload_size)
 	return var_hdr->ret_status;
 }
 
-#define COMM_BUF_SIZE(__payload_size)	(MM_COMMUNICATE_HEADER_SIZE + \
-					 MM_VARIABLE_COMMUNICATE_SIZE + \
-					 (__payload_size))
-
 /**
  * setup_mm_hdr() -	Allocate a buffer for StandAloneMM and initialize the
  *			header data.
@@ -177,8 +173,9 @@ static void *setup_mm_hdr(u8 **dptr, size_t payload_size, size_t func,
 		return NULL;
 	}
 
-	comm_buf = alloc_pages_exact(COMM_BUF_SIZE(payload_size),
-				     GFP_KERNEL | __GFP_ZERO);
+	comm_buf = kzalloc(MM_COMMUNICATE_HEADER_SIZE +
+				   MM_VARIABLE_COMMUNICATE_SIZE + payload_size,
+			   GFP_KERNEL);
 	if (!comm_buf) {
 		*ret = EFI_OUT_OF_RESOURCES;
 		return NULL;
@@ -242,7 +239,7 @@ static efi_status_t get_max_payload(size_t *size)
 	 */
 	*size -= 2;
 out:
-	free_pages_exact(comm_buf, COMM_BUF_SIZE(payload_size));
+	kfree(comm_buf);
 	return ret;
 }
 
@@ -285,7 +282,7 @@ static efi_status_t get_property_int(u16 *name, size_t name_size,
 	memcpy(var_property, &smm_property->property, sizeof(*var_property));
 
 out:
-	free_pages_exact(comm_buf, COMM_BUF_SIZE(payload_size));
+	kfree(comm_buf);
 	return ret;
 }
 
@@ -350,7 +347,7 @@ static efi_status_t tee_get_variable(u16 *name, efi_guid_t *vendor,
 	memcpy(data, (u8 *)var_acc->name + var_acc->name_size,
 	       var_acc->data_size);
 out:
-	free_pages_exact(comm_buf, COMM_BUF_SIZE(payload_size));
+	kfree(comm_buf);
 	return ret;
 }
 
@@ -407,7 +404,7 @@ static efi_status_t tee_get_next_variable(unsigned long *name_size,
 	memcpy(name, var_getnext->name, var_getnext->name_size);
 
 out:
-	free_pages_exact(comm_buf, COMM_BUF_SIZE(payload_size));
+	kfree(comm_buf);
 	return ret;
 }
 
@@ -470,7 +467,7 @@ static efi_status_t tee_set_variable(efi_char16_t *name, efi_guid_t *vendor,
 	ret = mm_communicate(comm_buf, payload_size);
 	dev_dbg(pvt_data.dev, "Set Variable %s %d %lx\n", __FILE__, __LINE__, ret);
 out:
-	free_pages_exact(comm_buf, COMM_BUF_SIZE(payload_size));
+	kfree(comm_buf);
 	return ret;
 }
 
@@ -510,7 +507,7 @@ static efi_status_t tee_query_variable_info(u32 attributes,
 	*max_variable_size = mm_query_info->max_variable_size;
 
 out:
-	free_pages_exact(comm_buf, COMM_BUF_SIZE(payload_size));
+	kfree(comm_buf);
 	return ret;
 }
 

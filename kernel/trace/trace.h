@@ -1230,7 +1230,6 @@ bool ftrace_event_is_function(struct trace_event_call *call);
  */
 struct trace_parser {
 	bool		cont;
-	bool		fail;
 	char		*buffer;
 	unsigned	idx;
 	unsigned	size;
@@ -1238,7 +1237,7 @@ struct trace_parser {
 
 static inline bool trace_parser_loaded(struct trace_parser *parser)
 {
-	return !parser->fail && parser->idx != 0;
+	return (parser->idx != 0);
 }
 
 static inline bool trace_parser_cont(struct trace_parser *parser)
@@ -1250,11 +1249,6 @@ static inline void trace_parser_clear(struct trace_parser *parser)
 {
 	parser->cont = false;
 	parser->idx = 0;
-}
-
-static inline void trace_parser_fail(struct trace_parser *parser)
-{
-	parser->fail = true;
 }
 
 extern int trace_parser_get_init(struct trace_parser *parser, int size);
@@ -2151,7 +2145,7 @@ static inline bool is_good_system_name(const char *name)
 static inline void sanitize_event_name(char *name)
 {
 	while (*name++ != '\0')
-		if (*name == ':' || *name == '.' || *name == '*')
+		if (*name == ':' || *name == '.')
 			*name = '_';
 }
 

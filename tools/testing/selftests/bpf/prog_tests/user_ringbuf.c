@@ -21,7 +21,8 @@
 #include "../progs/test_user_ringbuf.h"
 
 static const long c_sample_size = sizeof(struct sample) + BPF_RINGBUF_HDR_SZ;
-static long c_ringbuf_size, c_max_entries;
+static const long c_ringbuf_size = 1 << 12; /* 1 small page */
+static const long c_max_entries = c_ringbuf_size / c_sample_size;
 
 static void drain_current_samples(void)
 {
@@ -423,9 +424,7 @@ static void test_user_ringbuf_loop(void)
 	uint32_t remaining_samples = total_samples;
 	int err;
 
-	if (!ASSERT_LT(c_max_entries, total_samples, "compare_c_max_entries"))
-		return;
-
+	BUILD_BUG_ON(total_samples <= c_max_entries);
 	err = load_skel_create_user_ringbuf(&skel, &ringbuf);
 	if (err)
 		return;
@@ -686,9 +685,6 @@ static struct {
 void test_user_ringbuf(void)
 {
 	int i;
-
-	c_ringbuf_size = getpagesize(); /* 1 page */
-	c_max_entries = c_ringbuf_size / c_sample_size;
 
 	for (i = 0; i < ARRAY_SIZE(success_tests); i++) {
 		if (!test__start_subtest(success_tests[i].test_name))

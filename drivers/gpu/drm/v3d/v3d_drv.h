@@ -58,12 +58,6 @@ struct v3d_queue_state {
 
 	/* Stores the GPU stats for this queue in the global context. */
 	struct v3d_stats stats;
-
-	/* Currently active job for this queue */
-	struct v3d_job *active_job;
-	spinlock_t queue_lock;
-	/* Protect dma fence for signalling job completion */
-	spinlock_t fence_lock;
 };
 
 /* Performance monitor object. The perform lifetime is controlled by userspace
@@ -171,7 +165,17 @@ struct v3d_dev {
 
 	struct work_struct overflow_mem_work;
 
+	struct v3d_bin_job *bin_job;
+	struct v3d_render_job *render_job;
+	struct v3d_tfu_job *tfu_job;
+	struct v3d_csd_job *csd_job;
+
 	struct v3d_queue_state queue[V3D_MAX_QUEUES];
+
+	/* Spinlock used to synchronize the overflow memory
+	 * management against bin job submission.
+	 */
+	spinlock_t job_lock;
 
 	/* Used to track the active perfmon if any. */
 	struct v3d_perfmon *active_perfmon;
@@ -318,9 +322,9 @@ struct v3d_job {
 	struct v3d_perfmon *perfmon;
 
 	/* File descriptor of the process that submitted the job that could be used
-	 * to collect per-process information about the GPU.
+	 * for collecting stats by process of GPU usage.
 	 */
-	struct v3d_file_priv *file_priv;
+	struct drm_file *file;
 
 	/* Callback for the freeing of the job on refcount going to 0. */
 	void (*free)(struct kref *ref);
@@ -561,7 +565,7 @@ void v3d_get_stats(const struct v3d_stats *stats, u64 timestamp,
 
 /* v3d_fence.c */
 extern const struct dma_fence_ops v3d_fence_ops;
-struct dma_fence *v3d_fence_create(struct v3d_dev *v3d, enum v3d_queue q);
+struct dma_fence *v3d_fence_create(struct v3d_dev *v3d, enum v3d_queue queue);
 
 /* v3d_gem.c */
 int v3d_gem_init(struct drm_device *dev);
@@ -605,7 +609,7 @@ void v3d_timestamp_query_info_free(struct v3d_timestamp_query_info *query_info,
 				   unsigned int count);
 void v3d_performance_query_info_free(struct v3d_performance_query_info *query_info,
 				     unsigned int count);
-void v3d_job_update_stats(struct v3d_job *job, enum v3d_queue q);
+void v3d_job_update_stats(struct v3d_job *job, enum v3d_queue queue);
 int v3d_sched_init(struct v3d_dev *v3d);
 void v3d_sched_fini(struct v3d_dev *v3d);
 

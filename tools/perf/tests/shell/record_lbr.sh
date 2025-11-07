@@ -4,12 +4,7 @@
 
 set -e
 
-ParanoidAndNotRoot() {
-  [ "$(id -u)" != 0 ] && [ "$(cat /proc/sys/kernel/perf_event_paranoid)" -gt $1 ]
-}
-
-if [ ! -f /sys/bus/event_source/devices/cpu/caps/branches ] &&
-   [ ! -f /sys/bus/event_source/devices/cpu_core/caps/branches ]
+if [ ! -f /sys/devices/cpu/caps/branches ] && [ ! -f /sys/devices/cpu_core/caps/branches ]
 then
   echo "Skip: only x86 CPUs support LBR"
   exit 2
@@ -27,7 +22,6 @@ cleanup() {
 }
 
 trap_cleanup() {
-  echo "Unexpected signal in ${FUNCNAME[1]}"
   cleanup
   exit 1
 }
@@ -128,11 +122,8 @@ lbr_test "-j ind_call" "any indirect call" 2
 lbr_test "-j ind_jmp" "any indirect jump" 100
 lbr_test "-j call" "direct calls" 2
 lbr_test "-j ind_call,u" "any indirect user call" 100
-if ! ParanoidAndNotRoot 1
-then
-  lbr_test "-a -b" "system wide any branch" 2
-  lbr_test "-a -j any_call" "system wide any call" 2
-fi
+lbr_test "-a -b" "system wide any branch" 2
+lbr_test "-a -j any_call" "system wide any call" 2
 
 # Parallel
 parallel_lbr_test "-b" "parallel any branch" 100 &
@@ -149,16 +140,10 @@ parallel_lbr_test "-j call" "parallel direct calls" 100 &
 pid6=$!
 parallel_lbr_test "-j ind_call,u" "parallel any indirect user call" 100 &
 pid7=$!
-if ParanoidAndNotRoot 1
-then
-  pid8=
-  pid9=
-else
-  parallel_lbr_test "-a -b" "parallel system wide any branch" 100 &
-  pid8=$!
-  parallel_lbr_test "-a -j any_call" "parallel system wide any call" 100 &
-  pid9=$!
-fi
+parallel_lbr_test "-a -b" "parallel system wide any branch" 100 &
+pid8=$!
+parallel_lbr_test "-a -j any_call" "parallel system wide any call" 100 &
+pid9=$!
 
 for pid in $pid1 $pid2 $pid3 $pid4 $pid5 $pid6 $pid7 $pid8 $pid9
 do

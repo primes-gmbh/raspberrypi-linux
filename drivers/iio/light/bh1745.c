@@ -743,7 +743,7 @@ static irqreturn_t bh1745_trigger_handler(int interrupt, void *p)
 	struct bh1745_data *data = iio_priv(indio_dev);
 	struct {
 		u16 chans[4];
-		aligned_s64 timestamp;
+		s64 timestamp __aligned(8);
 	} scan;
 	u16 value;
 	int ret;

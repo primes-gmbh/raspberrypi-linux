@@ -75,8 +75,8 @@ asm (
 	CALL_DEPTH_ACCOUNT
 "	call my_direct_func1\n"
 "	leave\n"
-	ASM_RET
 "	.size		my_tramp1, .-my_tramp1\n"
+	ASM_RET
 
 "	.type		my_tramp2, @function\n"
 "	.globl		my_tramp2\n"

@@ -1089,7 +1089,6 @@ static struct ata_port_operations ich_pata_ops = {
 };
 
 static struct attribute *piix_sidpr_shost_attrs[] = {
-	&dev_attr_link_power_management_supported.attr,
 	&dev_attr_link_power_management_policy.attr,
 	NULL
 };

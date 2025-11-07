@@ -1730,17 +1730,16 @@ err_register_mdiobus:
 static void ftgmac100_phy_disconnect(struct net_device *netdev)
 {
 	struct ftgmac100 *priv = netdev_priv(netdev);
-	struct phy_device *phydev = netdev->phydev;
 
-	if (!phydev)
+	if (!netdev->phydev)
 		return;
 
-	phy_disconnect(phydev);
+	phy_disconnect(netdev->phydev);
 	if (of_phy_is_fixed_link(priv->dev->of_node))
 		of_phy_deregister_fixed_link(priv->dev->of_node);
 
 	if (priv->use_ncsi)
-		fixed_phy_unregister(phydev);
+		fixed_phy_unregister(netdev->phydev);
 }
 
 static void ftgmac100_destroy_mdio(struct net_device *netdev)

@@ -20,10 +20,9 @@
 
 #include <drm/drm_framebuffer.h>
 
-struct hibmc_vdac {
-	struct drm_device *dev;
-	struct drm_encoder encoder;
-	struct drm_connector connector;
+struct hibmc_connector {
+	struct drm_connector base;
+
 	struct i2c_adapter adapter;
 	struct i2c_algo_bit_data bit_data;
 };
@@ -36,12 +35,13 @@ struct hibmc_drm_private {
 	struct drm_device dev;
 	struct drm_plane primary_plane;
 	struct drm_crtc crtc;
-	struct hibmc_vdac vdac;
+	struct drm_encoder encoder;
+	struct hibmc_connector connector;
 };
 
-static inline struct hibmc_vdac *to_hibmc_vdac(struct drm_connector *connector)
+static inline struct hibmc_connector *to_hibmc_connector(struct drm_connector *connector)
 {
-	return container_of(connector, struct hibmc_vdac, connector);
+	return container_of(connector, struct hibmc_connector, base);
 }
 
 static inline struct hibmc_drm_private *to_hibmc_drm_private(struct drm_device *dev)
@@ -57,7 +57,6 @@ void hibmc_set_current_gate(struct hibmc_drm_private *priv,
 int hibmc_de_init(struct hibmc_drm_private *priv);
 int hibmc_vdac_init(struct hibmc_drm_private *priv);
 
-int hibmc_ddc_create(struct drm_device *drm_dev, struct hibmc_vdac *connector);
-void hibmc_ddc_del(struct hibmc_vdac *vdac);
+int hibmc_ddc_create(struct drm_device *drm_dev, struct hibmc_connector *connector);
 
 #endif

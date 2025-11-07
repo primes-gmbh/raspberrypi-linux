@@ -340,8 +340,9 @@ static int rp1_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 					rp1_chained_handle_irq);
 	}
 
-	of_node_to_fwnode(rp1_node)->dev = rp1->dev;
-	of_platform_populate(rp1_node, NULL, NULL, &pcie_pdev->dev);
+	if (rp1_node)
+		of_platform_populate(rp1_node, NULL, NULL, &pcie_pdev->dev);
+
 	of_node_put(rp1_node);
 
 	return 0;

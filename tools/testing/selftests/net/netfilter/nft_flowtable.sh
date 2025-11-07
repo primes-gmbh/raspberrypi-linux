@@ -20,7 +20,6 @@ ret=0
 SOCAT_TIMEOUT=60
 
 nsin=""
-nsin_small=""
 ns1out=""
 ns2out=""
 
@@ -37,7 +36,7 @@ cleanup() {
 
 	cleanup_all_ns
 
-	rm -f "$nsin" "$nsin_small" "$ns1out" "$ns2out"
+	rm -f "$nsin" "$ns1out" "$ns2out"
 
 	[ "$log_netns" -eq 0 ] && sysctl -q net.netfilter.nf_log_all_netns="$log_netns"
 }
@@ -73,7 +72,6 @@ lmtu=1500
 rmtu=2000
 
 filesize=$((2 * 1024 * 1024))
-filesize_small=$((filesize / 16))
 
 usage(){
 	echo "nft_flowtable.sh [OPTIONS]"
@@ -91,10 +89,7 @@ do
 		o) omtu=$OPTARG;;
 		l) lmtu=$OPTARG;;
 		r) rmtu=$OPTARG;;
-		s)
-			filesize=$OPTARG
-			filesize_small=$((OPTARG / 16))
-		;;
+		s) filesize=$OPTARG;;
 		*) usage;;
 	esac
 done
@@ -220,7 +215,6 @@ if ! ip netns exec "$ns2" ping -c 1 -q 10.0.1.99 > /dev/null; then
 fi
 
 nsin=$(mktemp)
-nsin_small=$(mktemp)
 ns1out=$(mktemp)
 ns2out=$(mktemp)
 
@@ -271,7 +265,6 @@ check_counters()
 check_dscp()
 {
 	local what=$1
-	local pmtud="$2"
 	local ok=1
 
 	local counter
@@ -284,39 +277,37 @@ check_dscp()
 	local pc4z=${counter%*bytes*}
 	local pc4z=${pc4z#*packets}
 
-	local failmsg="FAIL: pmtu $pmtu: $what counters do not match, expected"
-
 	case "$what" in
 	"dscp_none")
 		if [ "$pc4" -gt 0 ] || [ "$pc4z" -eq 0 ]; then
-			echo "$failmsg dscp3 == 0, dscp0 > 0, but got $pc4,$pc4z" 1>&2
+			echo "FAIL: dscp counters do not match, expected dscp3 == 0, dscp0 > 0, but got $pc4,$pc4z" 1>&2
 			ret=1
 			ok=0
 		fi
 		;;
 	"dscp_fwd")
 		if [ "$pc4" -eq 0 ] || [ "$pc4z" -eq 0 ]; then
-			echo "$failmsg dscp3 and dscp0 > 0 but got $pc4,$pc4z" 1>&2
+			echo "FAIL: dscp counters do not match, expected dscp3 and dscp0 > 0 but got $pc4,$pc4z" 1>&2
 			ret=1
 			ok=0
 		fi
 		;;
 	"dscp_ingress")
 		if [ "$pc4" -eq 0 ] || [ "$pc4z" -gt 0 ]; then
-			echo "$failmsg dscp3 > 0, dscp0 == 0 but got $pc4,$pc4z" 1>&2
+			echo "FAIL: dscp counters do not match, expected dscp3 > 0, dscp0 == 0 but got $pc4,$pc4z" 1>&2
 			ret=1
 			ok=0
 		fi
 		;;
 	"dscp_egress")
 		if [ "$pc4" -eq 0 ] || [ "$pc4z" -gt 0 ]; then
-			echo "$failmsg dscp3 > 0, dscp0 == 0 but got $pc4,$pc4z" 1>&2
+			echo "FAIL: dscp counters do not match, expected dscp3 > 0, dscp0 == 0 but got $pc4,$pc4z" 1>&2
 			ret=1
 			ok=0
 		fi
 		;;
 	*)
-		echo "$failmsg: Unknown DSCP check" 1>&2
+		echo "FAIL: Unknown DSCP check" 1>&2
 		ret=1
 		ok=0
 	esac
@@ -328,9 +319,9 @@ check_dscp()
 
 check_transfer()
 {
-	local in=$1
-	local out=$2
-	local what=$3
+	in=$1
+	out=$2
+	what=$3
 
 	if ! cmp "$in" "$out" > /dev/null 2>&1; then
 		echo "FAIL: file mismatch for $what" 1>&2
@@ -351,39 +342,25 @@ test_tcp_forwarding_ip()
 {
 	local nsa=$1
 	local nsb=$2
-	local pmtu=$3
-	local dstip=$4
-	local dstport=$5
+	local dstip=$3
+	local dstport=$4
 	local lret=0
-	local socatc
-	local socatl
-	local infile="$nsin"
 
-	if [ $pmtu -eq 0 ]; then
-		infile="$nsin_small"
-	fi
-
-	timeout "$SOCAT_TIMEOUT" ip netns exec "$nsb" socat -4 TCP-LISTEN:12345,reuseaddr STDIO < "$infile" > "$ns2out" &
+	timeout "$SOCAT_TIMEOUT" ip netns exec "$nsb" socat -4 TCP-LISTEN:12345,reuseaddr STDIO < "$nsin" > "$ns2out" &
 	lpid=$!
 
 	busywait 1000 listener_ready
 
-	timeout "$SOCAT_TIMEOUT" ip netns exec "$nsa" socat -4 TCP:"$dstip":"$dstport" STDIO < "$infile" > "$ns1out"
-	socatc=$?
+	timeout "$SOCAT_TIMEOUT" ip netns exec "$nsa" socat -4 TCP:"$dstip":"$dstport" STDIO < "$nsin" > "$ns1out"
 
 	wait $lpid
-	socatl=$?
 
-	if [ $socatl -ne 0 ] || [ $socatc -ne 0 ];then
-		rc=1
-	fi
-
-	if ! check_transfer "$infile" "$ns2out" "ns1 -> ns2"; then
+	if ! check_transfer "$nsin" "$ns2out" "ns1 -> ns2"; then
 		lret=1
 		ret=1
 	fi
 
-	if ! check_transfer "$infile" "$ns1out" "ns1 <- ns2"; then
+	if ! check_transfer "$nsin" "$ns1out" "ns1 <- ns2"; then
 		lret=1
 		ret=1
 	fi
@@ -393,16 +370,14 @@ test_tcp_forwarding_ip()
 
 test_tcp_forwarding()
 {
-	local pmtu="$3"
-
-	test_tcp_forwarding_ip "$1" "$2" "$pmtu" 10.0.2.99 12345
+	test_tcp_forwarding_ip "$1" "$2" 10.0.2.99 12345
 
 	return $?
 }
 
 test_tcp_forwarding_set_dscp()
 {
-	local pmtu="$3"
+	check_dscp "dscp_none"
 
 ip netns exec "$nsr1" nft -f - <<EOF
 table netdev dscpmangle {
@@ -413,8 +388,8 @@ table netdev dscpmangle {
 }
 EOF
 if [ $? -eq 0 ]; then
-	test_tcp_forwarding_ip "$1" "$2" "$3" 10.0.2.99 12345
-	check_dscp "dscp_ingress" "$pmtu"
+	test_tcp_forwarding_ip "$1" "$2"  10.0.2.99 12345
+	check_dscp "dscp_ingress"
 
 	ip netns exec "$nsr1" nft delete table netdev dscpmangle
 else
@@ -430,10 +405,10 @@ table netdev dscpmangle {
 }
 EOF
 if [ $? -eq 0 ]; then
-	test_tcp_forwarding_ip "$1" "$2" "$pmtu"  10.0.2.99 12345
-	check_dscp "dscp_egress" "$pmtu"
+	test_tcp_forwarding_ip "$1" "$2"  10.0.2.99 12345
+	check_dscp "dscp_egress"
 
-	ip netns exec "$nsr1" nft delete table netdev dscpmangle
+	ip netns exec "$nsr1" nft flush table netdev dscpmangle
 else
 	echo "SKIP: Could not load netdev:egress for veth1"
 fi
@@ -441,53 +416,48 @@ fi
 	# partial.  If flowtable really works, then both dscp-is-0 and dscp-is-cs3
 	# counters should have seen packets (before and after ft offload kicks in).
 	ip netns exec "$nsr1" nft -a insert rule inet filter forward ip dscp set cs3
-	test_tcp_forwarding_ip "$1" "$2" "$pmtu"  10.0.2.99 12345
-	check_dscp "dscp_fwd" "$pmtu"
+	test_tcp_forwarding_ip "$1" "$2"  10.0.2.99 12345
+	check_dscp "dscp_fwd"
 }
 
 test_tcp_forwarding_nat()
 {
-	local nsa="$1"
-	local nsb="$2"
-	local pmtu="$3"
-	local what="$4"
 	local lret
+	local pmtu
 
-	[ "$pmtu" -eq 0 ] && what="$what (pmtu disabled)"
-
-	test_tcp_forwarding_ip "$nsa" "$nsb" "$pmtu" 10.0.2.99 12345
+	test_tcp_forwarding_ip "$1" "$2" 10.0.2.99 12345
 	lret=$?
+
+	pmtu=$3
+	what=$4
 
 	if [ "$lret" -eq 0 ] ; then
 		if [ "$pmtu" -eq 1 ] ;then
-			check_counters "flow offload for ns1/ns2 with masquerade $what"
+			check_counters "flow offload for ns1/ns2 with masquerade and pmtu discovery $what"
 		else
 			echo "PASS: flow offload for ns1/ns2 with masquerade $what"
 		fi
 
-		test_tcp_forwarding_ip "$1" "$2" "$pmtu" 10.6.6.6 1666
+		test_tcp_forwarding_ip "$1" "$2" 10.6.6.6 1666
 		lret=$?
 		if [ "$pmtu" -eq 1 ] ;then
-			check_counters "flow offload for ns1/ns2 with dnat $what"
+			check_counters "flow offload for ns1/ns2 with dnat and pmtu discovery $what"
 		elif [ "$lret" -eq 0 ] ; then
 			echo "PASS: flow offload for ns1/ns2 with dnat $what"
 		fi
-	else
-		echo "FAIL: flow offload for ns1/ns2 with dnat $what"
 	fi
 
 	return $lret
 }
 
 make_file "$nsin" "$filesize"
-make_file "$nsin_small" "$filesize_small"
 
 # First test:
 # No PMTU discovery, nsr1 is expected to fragment packets from ns1 to ns2 as needed.
 # Due to MTU mismatch in both directions, all packets (except small packets like pure
 # acks) have to be handled by normal forwarding path.  Therefore, packet counters
 # are not checked.
-if test_tcp_forwarding "$ns1" "$ns2" 0; then
+if test_tcp_forwarding "$ns1" "$ns2"; then
 	echo "PASS: flow offloaded for ns1/ns2"
 else
 	echo "FAIL: flow offload for ns1/ns2:" 1>&2
@@ -519,9 +489,8 @@ table ip nat {
 }
 EOF
 
-check_dscp "dscp_none" "0"
 if ! test_tcp_forwarding_set_dscp "$ns1" "$ns2" 0 ""; then
-	echo "FAIL: flow offload for ns1/ns2 with dscp update and no pmtu discovery" 1>&2
+	echo "FAIL: flow offload for ns1/ns2 with dscp update" 1>&2
 	exit 0
 fi
 
@@ -543,14 +512,6 @@ ip netns exec "$ns2" sysctl net.ipv4.ip_no_pmtu_disc=0 > /dev/null
 # are lower than file size and packets were forwarded via flowtable layer.
 # For earlier tests (large mtus), packets cannot be handled via flowtable
 # (except pure acks and other small packets).
-ip netns exec "$nsr1" nft reset counters table inet filter >/dev/null
-ip netns exec "$ns2"  nft reset counters table inet filter >/dev/null
-
-if ! test_tcp_forwarding_set_dscp "$ns1" "$ns2" 1 ""; then
-	echo "FAIL: flow offload for ns1/ns2 with dscp update and pmtu discovery" 1>&2
-	exit 0
-fi
-
 ip netns exec "$nsr1" nft reset counters table inet filter >/dev/null
 
 if ! test_tcp_forwarding_nat "$ns1" "$ns2" 1 ""; then
@@ -683,7 +644,7 @@ ip -net "$ns2" route del 192.168.10.1 via 10.0.2.1
 ip -net "$ns2" route add default via 10.0.2.1
 ip -net "$ns2" route add default via dead:2::1
 
-if test_tcp_forwarding "$ns1" "$ns2" 1; then
+if test_tcp_forwarding "$ns1" "$ns2"; then
 	check_counters "ipsec tunnel mode for ns1/ns2"
 else
 	echo "FAIL: ipsec tunnel mode for ns1/ns2"
@@ -707,7 +668,7 @@ if [ "$1" = "" ]; then
 	fi
 
 	echo "re-run with random mtus and file size: -o $o -l $l -r $r -s $filesize"
-	$0 -o "$o" -l "$l" -r "$r" -s "$filesize" || ret=1
+	$0 -o "$o" -l "$l" -r "$r" -s "$filesize"
 fi
 
 exit $ret

@@ -360,7 +360,6 @@ cifs_chan_update_iface(struct cifs_ses *ses, struct TCP_Server_Info *server)
 	struct cifs_server_iface *old_iface = NULL;
 	struct cifs_server_iface *last_iface = NULL;
 	struct sockaddr_storage ss;
-	int retry = 0;
 
 	spin_lock(&ses->chan_lock);
 	chan_index = cifs_ses_get_chan_index(ses, server);
@@ -389,7 +388,6 @@ cifs_chan_update_iface(struct cifs_ses *ses, struct TCP_Server_Info *server)
 		return;
 	}
 
-try_again:
 	last_iface = list_last_entry(&ses->iface_list, struct cifs_server_iface,
 				     iface_head);
 	iface_min_speed = last_iface->speed;
@@ -427,13 +425,6 @@ try_again:
 	}
 
 	if (list_entry_is_head(iface, &ses->iface_list, iface_head)) {
-		list_for_each_entry(iface, &ses->iface_list, iface_head)
-			iface->weight_fulfilled = 0;
-
-		/* see if it can be satisfied in second attempt */
-		if (!retry++)
-			goto try_again;
-
 		iface = NULL;
 		cifs_dbg(FYI, "unable to find a suitable iface\n");
 	}

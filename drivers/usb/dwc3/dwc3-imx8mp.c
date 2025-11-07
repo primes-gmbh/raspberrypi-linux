@@ -244,7 +244,7 @@ static int dwc3_imx8mp_probe(struct platform_device *pdev)
 					IRQF_ONESHOT, dev_name(dev), dwc3_imx);
 	if (err) {
 		dev_err(dev, "failed to request IRQ #%d --> %d\n", irq, err);
-		goto put_dwc3;
+		goto depopulate;
 	}
 
 	device_set_wakeup_capable(dev, true);
@@ -252,8 +252,6 @@ static int dwc3_imx8mp_probe(struct platform_device *pdev)
 
 	return 0;
 
-put_dwc3:
-	put_device(&dwc3_imx->dwc3->dev);
 depopulate:
 	of_platform_depopulate(dev);
 remove_swnode:
@@ -267,10 +265,7 @@ disable_rpm:
 
 static void dwc3_imx8mp_remove(struct platform_device *pdev)
 {
-	struct dwc3_imx8mp *dwc3_imx = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
-
-	put_device(&dwc3_imx->dwc3->dev);
 
 	pm_runtime_get_sync(dev);
 	of_platform_depopulate(dev);

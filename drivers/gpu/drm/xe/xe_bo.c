@@ -157,8 +157,6 @@ static void try_add_system(struct xe_device *xe, struct xe_bo *bo,
 
 		bo->placements[*c] = (struct ttm_place) {
 			.mem_type = XE_PL_TT,
-			.flags = (bo_flags & XE_BO_FLAG_VRAM_MASK) ?
-			TTM_PL_FLAG_FALLBACK : 0,
 		};
 		*c += 1;
 	}
@@ -673,8 +671,7 @@ static int xe_bo_move(struct ttm_buffer_object *ttm_bo, bool evict,
 	}
 
 	if (ttm_bo->type == ttm_bo_type_sg) {
-		if (new_mem->mem_type == XE_PL_SYSTEM)
-			ret = xe_bo_move_notify(bo, ctx);
+		ret = xe_bo_move_notify(bo, ctx);
 		if (!ret)
 			ret = xe_bo_move_dmabuf(ttm_bo, new_mem);
 		return ret;
@@ -1745,7 +1742,6 @@ uint64_t vram_region_gpu_offset(struct ttm_resource *res)
 /**
  * xe_bo_pin_external - pin an external BO
  * @bo: buffer object to be pinned
- * @in_place: Pin in current placement, don't attempt to migrate.
  *
  * Pin an external (not tied to a VM, can be exported via dma-buf / prime FD)
  * BO. Unique call compared to xe_bo_pin as this function has it own set of
@@ -1753,7 +1749,7 @@ uint64_t vram_region_gpu_offset(struct ttm_resource *res)
  *
  * Returns 0 for success, negative error code otherwise.
  */
-int xe_bo_pin_external(struct xe_bo *bo, bool in_place)
+int xe_bo_pin_external(struct xe_bo *bo)
 {
 	struct xe_device *xe = xe_bo_device(bo);
 	int err;
@@ -1762,11 +1758,9 @@ int xe_bo_pin_external(struct xe_bo *bo, bool in_place)
 	xe_assert(xe, xe_bo_is_user(bo));
 
 	if (!xe_bo_is_pinned(bo)) {
-		if (!in_place) {
-			err = xe_bo_validate(bo, NULL, false);
-			if (err)
-				return err;
-		}
+		err = xe_bo_validate(bo, NULL, false);
+		if (err)
+			return err;
 
 		if (xe_bo_is_vram(bo)) {
 			spin_lock(&xe->pinned.lock);
@@ -1917,9 +1911,6 @@ int xe_bo_validate(struct xe_bo *bo, struct xe_vm *vm, bool allow_res_evict)
 		.interruptible = true,
 		.no_wait_gpu = false,
 	};
-
-	if (xe_bo_is_pinned(bo))
-		return 0;
 
 	if (vm) {
 		lockdep_assert_held(&vm->lock);

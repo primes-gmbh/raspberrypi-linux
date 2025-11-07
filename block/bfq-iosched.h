@@ -813,7 +813,8 @@ struct bfq_data {
 	 * Depth limits used in bfq_limit_depth (see comments on the
 	 * function)
 	 */
-	unsigned int async_depths[2][2];
+	unsigned int word_depths[2][2];
+	unsigned int full_depth_shift;
 
 	/*
 	 * Number of independent actuators. This is equal to 1 in

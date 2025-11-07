@@ -223,11 +223,7 @@ fn main() {
         ts.push("features", features);
         ts.push("llvm-target", "x86_64-linux-gnu");
         ts.push("supported-sanitizers", ["kcfi", "kernel-address"]);
-        if cfg.rustc_version_atleast(1, 91, 0) {
-            ts.push("target-pointer-width", 64);
-        } else {
-            ts.push("target-pointer-width", "64");
-        }
+        ts.push("target-pointer-width", "64");
     } else if cfg.has("X86_32") {
         // This only works on UML, as i386 otherwise needs regparm support in rustc
         if !cfg.has("UML") {
@@ -247,11 +243,7 @@ fn main() {
         }
         ts.push("features", features);
         ts.push("llvm-target", "i386-unknown-linux-gnu");
-        if cfg.rustc_version_atleast(1, 91, 0) {
-            ts.push("target-pointer-width", 32);
-        } else {
-            ts.push("target-pointer-width", "32");
-        }
+        ts.push("target-pointer-width", "32");
     } else if cfg.has("LOONGARCH") {
         panic!("loongarch uses the builtin rustc loongarch64-unknown-none-softfloat target");
     } else {

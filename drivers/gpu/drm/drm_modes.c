@@ -2173,15 +2173,12 @@ static int drm_mode_parse_cmdline_options(const char *str,
 
 	option = str;
 	do {
-		sep = strchr(option, ',');
 		delim = strchr(option, '=');
 		if (!delim) {
-			if (!sep)
+			delim = strchr(option, ',');
+
+			if (!delim)
 				delim = option + strlen(option);
-			else
-				delim = sep;
-		} else if (sep && sep < delim) {
-			delim = sep;
 		}
 
 		if (!strncmp(option, "rotate", delim - option)) {

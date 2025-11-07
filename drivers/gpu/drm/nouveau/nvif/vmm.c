@@ -219,8 +219,7 @@ nvif_vmm_ctor(struct nvif_mmu *mmu, const char *name, s32 oclass,
 	case RAW: args->type = NVIF_VMM_V0_TYPE_RAW; break;
 	default:
 		WARN_ON(1);
-		ret = -EINVAL;
-		goto done;
+		return -EINVAL;
 	}
 
 	memcpy(args->data, argv, argc);

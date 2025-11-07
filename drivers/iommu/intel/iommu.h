@@ -541,8 +541,7 @@ enum {
 #define pasid_supported(iommu)	(sm_supported(iommu) &&			\
 				 ecap_pasid((iommu)->ecap))
 #define ssads_supported(iommu) (sm_supported(iommu) &&                 \
-				ecap_slads((iommu)->ecap) &&           \
-				ecap_smpwc(iommu->ecap))
+				ecap_slads((iommu)->ecap))
 #define nested_supported(iommu)	(sm_supported(iommu) &&			\
 				 ecap_nest((iommu)->ecap))
 
@@ -614,9 +613,6 @@ struct dmar_domain {
 	u8 nested_parent:1;		/* Has other domains nested on it */
 	u8 has_mappings:1;		/* Has mappings configured through
 					 * iommu_map() interface.
-					 */
-	u8 iotlb_sync_map:1;		/* Need to flush IOTLB cache or write
-					 * buffer when creating mappings.
 					 */
 
 	spinlock_t lock;		/* Protect device tracking lists */

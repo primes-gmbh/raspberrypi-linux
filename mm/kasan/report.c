@@ -398,9 +398,7 @@ static void print_address_description(void *addr, u8 tag,
 	}
 
 	if (is_vmalloc_addr(addr)) {
-		pr_err("The buggy address belongs to a");
-		if (!vmalloc_dump_obj(addr))
-			pr_cont(" vmalloc virtual mapping\n");
+		pr_err("The buggy address %px belongs to a vmalloc virtual mapping\n", addr);
 		page = vmalloc_to_page(addr);
 	}
 

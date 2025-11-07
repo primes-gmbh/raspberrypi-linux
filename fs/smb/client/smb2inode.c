@@ -206,10 +206,8 @@ replay_again:
 	server = cifs_pick_channel(ses);
 
 	vars = kzalloc(sizeof(*vars), GFP_ATOMIC);
-	if (vars == NULL) {
-		rc = -ENOMEM;
-		goto out;
-	}
+	if (vars == NULL)
+		return -ENOMEM;
 	rqst = &vars->rqst[0];
 	rsp_iov = &vars->rsp_iov[0];
 
@@ -641,7 +639,7 @@ finished:
 
 	tmp_rc = rc;
 	for (i = 0; i < num_cmds; i++) {
-		char *buf = rsp_iov[i + 1].iov_base;
+		char *buf = rsp_iov[i + i].iov_base;
 
 		if (buf && resp_buftype[i + 1] != CIFS_NO_BUFFER)
 			rc = server->ops->map_error(buf, false);
@@ -834,7 +832,6 @@ finished:
 	    smb2_should_replay(tcon, &retries, &cur_sleep))
 		goto replay_again;
 
-out:
 	if (cfile)
 		cifsFileInfo_put(cfile);
 
@@ -1220,33 +1217,31 @@ int
 smb2_set_file_info(struct inode *inode, const char *full_path,
 		   FILE_BASIC_INFO *buf, const unsigned int xid)
 {
-	struct kvec in_iov = { .iov_base = buf, .iov_len = sizeof(*buf), };
-	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
-	struct cifsFileInfo *cfile = NULL;
 	struct cifs_open_parms oparms;
+	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
 	struct tcon_link *tlink;
 	struct cifs_tcon *tcon;
-	int rc = 0;
+	struct cifsFileInfo *cfile;
+	struct kvec in_iov = { .iov_base = buf, .iov_len = sizeof(*buf), };
+	int rc;
+
+	if ((buf->CreationTime == 0) && (buf->LastAccessTime == 0) &&
+	    (buf->LastWriteTime == 0) && (buf->ChangeTime == 0) &&
+	    (buf->Attributes == 0))
+		return 0; /* would be a no op, no sense sending this */
 
 	tlink = cifs_sb_tlink(cifs_sb);
 	if (IS_ERR(tlink))
 		return PTR_ERR(tlink);
 	tcon = tlink_tcon(tlink);
 
-	if ((buf->CreationTime == 0) && (buf->LastAccessTime == 0) &&
-	    (buf->LastWriteTime == 0) && (buf->ChangeTime == 0)) {
-		if (buf->Attributes == 0)
-			goto out; /* would be a no op, no sense sending this */
-		cifs_get_writable_path(tcon, full_path, FIND_WR_ANY, &cfile);
-	}
-
+	cifs_get_writable_path(tcon, full_path, FIND_WR_ANY, &cfile);
 	oparms = CIFS_OPARMS(cifs_sb, tcon, full_path, FILE_WRITE_ATTRIBUTES,
 			     FILE_OPEN, 0, ACL_NO_MODE);
 	rc = smb2_compound_op(xid, tcon, cifs_sb,
 			      full_path, &oparms, &in_iov,
 			      &(int){SMB2_OP_SET_INFO}, 1,
 			      cfile, NULL, NULL, NULL);
-out:
 	cifs_put_tlink(tlink);
 	return rc;
 }

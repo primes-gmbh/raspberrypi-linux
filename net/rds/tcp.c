@@ -504,8 +504,12 @@ bool rds_tcp_tune(struct socket *sock)
 			release_sock(sk);
 			return false;
 		}
-		sk_net_refcnt_upgrade(sk);
-		put_net(net);
+		/* Update ns_tracker to current stack trace and refcounted tracker */
+		__netns_tracker_free(net, &sk->ns_tracker, false);
+
+		sk->sk_net_refcnt = 1;
+		netns_tracker_alloc(net, &sk->ns_tracker, GFP_KERNEL);
+		sock_inuse_add(net, 1);
 	}
 	rtn = net_generic(net, rds_tcp_netid);
 	if (rtn->sndbuf_size > 0) {

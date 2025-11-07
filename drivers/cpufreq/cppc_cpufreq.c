@@ -339,16 +339,6 @@ static int cppc_verify_policy(struct cpufreq_policy_data *policy)
 	return 0;
 }
 
-static unsigned int __cppc_cpufreq_get_transition_delay_us(unsigned int cpu)
-{
-	unsigned int transition_latency_ns = cppc_get_transition_latency(cpu);
-
-	if (transition_latency_ns == CPUFREQ_ETERNAL)
-		return CPUFREQ_DEFAULT_TRANSITION_LATENCY_NS / NSEC_PER_USEC;
-
-	return transition_latency_ns / NSEC_PER_USEC;
-}
-
 /*
  * The PCC subspace describes the rate at which platform can accept commands
  * on the shared PCC channel (including READs which do not count towards freq
@@ -371,12 +361,12 @@ static unsigned int cppc_cpufreq_get_transition_delay_us(unsigned int cpu)
 			return 10000;
 		}
 	}
-	return __cppc_cpufreq_get_transition_delay_us(cpu);
+	return cppc_get_transition_latency(cpu) / NSEC_PER_USEC;
 }
 #else
 static unsigned int cppc_cpufreq_get_transition_delay_us(unsigned int cpu)
 {
-	return __cppc_cpufreq_get_transition_delay_us(cpu);
+	return cppc_get_transition_latency(cpu) / NSEC_PER_USEC;
 }
 #endif
 
@@ -851,7 +841,7 @@ static struct freq_attr *cppc_cpufreq_attr[] = {
 };
 
 static struct cpufreq_driver cppc_cpufreq_driver = {
-	.flags = CPUFREQ_CONST_LOOPS | CPUFREQ_NEED_UPDATE_LIMITS,
+	.flags = CPUFREQ_CONST_LOOPS,
 	.verify = cppc_verify_policy,
 	.target = cppc_cpufreq_set_target,
 	.get = cppc_cpufreq_get_rate,

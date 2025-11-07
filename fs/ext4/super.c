@@ -266,15 +266,6 @@ struct buffer_head *ext4_sb_bread_unmovable(struct super_block *sb,
 	return __ext4_sb_bread_gfp(sb, block, 0, gfp);
 }
 
-struct buffer_head *ext4_sb_bread_nofail(struct super_block *sb,
-					 sector_t block)
-{
-	gfp_t gfp = mapping_gfp_constraint(sb->s_bdev->bd_mapping,
-			~__GFP_FS) | __GFP_MOVABLE | __GFP_NOFAIL;
-
-	return __ext4_sb_bread_gfp(sb, block, 0, gfp);
-}
-
 void ext4_sb_breadahead_unmovable(struct super_block *sb, sector_t block)
 {
 	struct buffer_head *bh = bdev_getblk(sb->s_bdev, block,
@@ -728,13 +719,9 @@ static void ext4_handle_error(struct super_block *sb, bool force_ro, int error,
 		 * In case the fs should keep running, we need to writeout
 		 * superblock through the journal. Due to lock ordering
 		 * constraints, it may not be safe to do it right here so we
-		 * defer superblock flushing to a workqueue. We just need to be
-		 * careful when the journal is already shutting down. If we get
-		 * here in that case, just update the sb directly as the last
-		 * transaction won't commit anyway.
+		 * defer superblock flushing to a workqueue.
 		 */
-		if (continue_fs && journal &&
-		    !ext4_test_mount_flag(sb, EXT4_MF_JOURNAL_DESTROY))
+		if (continue_fs && journal)
 			schedule_work(&EXT4_SB(sb)->s_sb_upd_work);
 		else
 			ext4_commit_super(sb);
@@ -1319,17 +1306,18 @@ static void ext4_put_super(struct super_block *sb)
 	ext4_unregister_li_request(sb);
 	ext4_quotas_off(sb, EXT4_MAXQUOTAS);
 
+	flush_work(&sbi->s_sb_upd_work);
 	destroy_workqueue(sbi->rsv_conversion_wq);
 	ext4_release_orphan_info(sb);
 
 	if (sbi->s_journal) {
 		aborted = is_journal_aborted(sbi->s_journal);
-		err = ext4_journal_destroy(sbi, sbi->s_journal);
+		err = jbd2_journal_destroy(sbi->s_journal);
+		sbi->s_journal = NULL;
 		if ((err < 0) && !aborted) {
 			ext4_abort(sb, -err, "Couldn't clean up the journal");
 		}
-	} else
-		flush_work(&sbi->s_sb_upd_work);
+	}
 
 	ext4_es_unregister_shrinker(sbi);
 	timer_shutdown_sync(&sbi->s_err_report);
@@ -1470,9 +1458,9 @@ static void ext4_free_in_core_inode(struct inode *inode)
 
 static void ext4_destroy_inode(struct inode *inode)
 {
-	if (ext4_inode_orphan_tracked(inode)) {
+	if (!list_empty(&(EXT4_I(inode)->i_orphan))) {
 		ext4_msg(inode->i_sb, KERN_ERR,
-			 "Inode %lu (%p): inode tracked as orphan!",
+			 "Inode %lu (%p): orphan list check failed!",
 			 inode->i_ino, EXT4_I(inode));
 		print_hex_dump(KERN_INFO, "", DUMP_PREFIX_ADDRESS, 16, 4,
 				EXT4_I(inode), sizeof(struct ext4_inode_info),
@@ -2031,9 +2019,6 @@ int ext4_init_fs_context(struct fs_context *fc)
 	fc->fs_private = ctx;
 	fc->ops = &ext4_context_ops;
 
-	/* i_version is always enabled now */
-	fc->sb_flags |= SB_I_VERSION;
-
 	return 0;
 }
 
@@ -2493,7 +2478,7 @@ static int parse_apply_sb_mount_options(struct super_block *sb,
 					struct ext4_fs_context *m_ctx)
 {
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
-	char s_mount_opts[65];
+	char *s_mount_opts = NULL;
 	struct ext4_fs_context *s_ctx = NULL;
 	struct fs_context *fc = NULL;
 	int ret = -ENOMEM;
@@ -2501,11 +2486,15 @@ static int parse_apply_sb_mount_options(struct super_block *sb,
 	if (!sbi->s_es->s_mount_opts[0])
 		return 0;
 
-	strscpy_pad(s_mount_opts, sbi->s_es->s_mount_opts);
+	s_mount_opts = kstrndup(sbi->s_es->s_mount_opts,
+				sizeof(sbi->s_es->s_mount_opts),
+				GFP_KERNEL);
+	if (!s_mount_opts)
+		return ret;
 
 	fc = kzalloc(sizeof(struct fs_context), GFP_KERNEL);
 	if (!fc)
-		return -ENOMEM;
+		goto out_free;
 
 	s_ctx = kzalloc(sizeof(struct ext4_fs_context), GFP_KERNEL);
 	if (!s_ctx)
@@ -2537,8 +2526,11 @@ parse_failed:
 	ret = 0;
 
 out_free:
-	ext4_fc_free(fc);
-	kfree(fc);
+	if (fc) {
+		ext4_fc_free(fc);
+		kfree(fc);
+	}
+	kfree(s_mount_opts);
 	return ret;
 }
 
@@ -4960,7 +4952,10 @@ static int ext4_load_and_init_journal(struct super_block *sb,
 	return 0;
 
 out:
-	ext4_journal_destroy(sbi, sbi->s_journal);
+	/* flush s_sb_upd_work before destroying the journal. */
+	flush_work(&sbi->s_sb_upd_work);
+	jbd2_journal_destroy(sbi->s_journal);
+	sbi->s_journal = NULL;
 	return -EINVAL;
 }
 
@@ -5282,6 +5277,9 @@ static int __ext4_fill_super(struct fs_context *fc, struct super_block *sb)
 	sb->s_flags = (sb->s_flags & ~SB_POSIXACL) |
 		(test_opt(sb, POSIX_ACL) ? SB_POSIXACL : 0);
 
+	/* i_version is always enabled now */
+	sb->s_flags |= SB_I_VERSION;
+
 	err = ext4_check_feature_compatibility(sb, es, silent);
 	if (err)
 		goto failed_mount;
@@ -5375,8 +5373,6 @@ static int __ext4_fill_super(struct fs_context *fc, struct super_block *sb)
 		err = ext4_load_and_init_journal(sb, es, ctx);
 		if (err)
 			goto failed_mount3a;
-		if (bdev_read_only(sb->s_bdev))
-		    needs_recovery = 0;
 	} else if (test_opt(sb, NOLOAD) && !sb_rdonly(sb) &&
 		   ext4_has_feature_journal_needs_recovery(sb)) {
 		ext4_msg(sb, KERN_ERR, "required journal recovery "
@@ -5649,7 +5645,10 @@ failed_mount_wq:
 	sbi->s_ea_block_cache = NULL;
 
 	if (sbi->s_journal) {
-		ext4_journal_destroy(sbi, sbi->s_journal);
+		/* flush s_sb_upd_work before journal destroy. */
+		flush_work(&sbi->s_sb_upd_work);
+		jbd2_journal_destroy(sbi->s_journal);
+		sbi->s_journal = NULL;
 	}
 failed_mount3a:
 	ext4_es_unregister_shrinker(sbi);
@@ -5957,7 +5956,7 @@ static journal_t *ext4_open_dev_journal(struct super_block *sb,
 	return journal;
 
 out_journal:
-	ext4_journal_destroy(EXT4_SB(sb), journal);
+	jbd2_journal_destroy(journal);
 out_bdev:
 	bdev_fput(bdev_file);
 	return ERR_PTR(errno);
@@ -6074,7 +6073,8 @@ static int ext4_load_journal(struct super_block *sb,
 	EXT4_SB(sb)->s_journal = journal;
 	err = ext4_clear_journal_err(sb, es);
 	if (err) {
-		ext4_journal_destroy(EXT4_SB(sb), journal);
+		EXT4_SB(sb)->s_journal = NULL;
+		jbd2_journal_destroy(journal);
 		return err;
 	}
 
@@ -6092,7 +6092,7 @@ static int ext4_load_journal(struct super_block *sb,
 	return 0;
 
 err_out:
-	ext4_journal_destroy(EXT4_SB(sb), journal);
+	jbd2_journal_destroy(journal);
 	return err;
 }
 

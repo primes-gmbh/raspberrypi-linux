@@ -536,9 +536,7 @@ static int display_open(struct inode *inode, struct file *file)
 
 	mutex_lock(&ictx->lock);
 
-	if (ictx->disconnected) {
-		retval = -ENODEV;
-	} else if (!ictx->display_supported) {
+	if (!ictx->display_supported) {
 		pr_err("display not supported by device\n");
 		retval = -ENODEV;
 	} else if (ictx->display_isopen) {
@@ -599,9 +597,6 @@ static int send_packet(struct imon_context *ictx)
 	int interval = 0;
 	int retval = 0;
 	struct usb_ctrlrequest *control_req = NULL;
-
-	if (ictx->disconnected)
-		return -ENODEV;
 
 	/* Check if we need to use control or interrupt urb */
 	if (!ictx->tx_control) {
@@ -954,13 +949,11 @@ static ssize_t vfd_write(struct file *file, const char __user *buf,
 	static const unsigned char vfd_packet6[] = {
 		0x01, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF };
 
+	if (ictx->disconnected)
+		return -ENODEV;
+
 	if (mutex_lock_interruptible(&ictx->lock))
 		return -ERESTARTSYS;
-
-	if (ictx->disconnected) {
-		retval = -ENODEV;
-		goto exit;
-	}
 
 	if (!ictx->dev_present_intf0) {
 		pr_err_ratelimited("no iMON device present\n");
@@ -1036,12 +1029,10 @@ static ssize_t lcd_write(struct file *file, const char __user *buf,
 	int retval = 0;
 	struct imon_context *ictx = file->private_data;
 
-	mutex_lock(&ictx->lock);
+	if (ictx->disconnected)
+		return -ENODEV;
 
-	if (ictx->disconnected) {
-		retval = -ENODEV;
-		goto exit;
-	}
+	mutex_lock(&ictx->lock);
 
 	if (!ictx->display_supported) {
 		pr_err_ratelimited("no iMON display present\n");
@@ -2508,11 +2499,7 @@ static void imon_disconnect(struct usb_interface *interface)
 	int ifnum;
 
 	ictx = usb_get_intfdata(interface);
-
-	mutex_lock(&ictx->lock);
 	ictx->disconnected = true;
-	mutex_unlock(&ictx->lock);
-
 	dev = ictx->dev;
 	ifnum = interface->cur_altsetting->desc.bInterfaceNumber;
 

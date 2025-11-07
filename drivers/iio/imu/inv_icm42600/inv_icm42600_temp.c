@@ -13,7 +13,7 @@
 #include "inv_icm42600.h"
 #include "inv_icm42600_temp.h"
 
-static int inv_icm42600_temp_read(struct inv_icm42600_state *st, s16 *temp)
+static int inv_icm42600_temp_read(struct inv_icm42600_state *st, int16_t *temp)
 {
 	struct device *dev = regmap_get_device(st->map);
 	__be16 *raw;
@@ -31,13 +31,9 @@ static int inv_icm42600_temp_read(struct inv_icm42600_state *st, s16 *temp)
 	if (ret)
 		goto exit;
 
-	*temp = (s16)be16_to_cpup(raw);
-	/*
-	 * Temperature data is invalid if both accel and gyro are off.
-	 * Return -EBUSY in this case.
-	 */
+	*temp = (int16_t)be16_to_cpup(raw);
 	if (*temp == INV_ICM42600_DATA_INVALID)
-		ret = -EBUSY;
+		ret = -EINVAL;
 
 exit:
 	mutex_unlock(&st->lock);
@@ -52,7 +48,7 @@ int inv_icm42600_temp_read_raw(struct iio_dev *indio_dev,
 			       int *val, int *val2, long mask)
 {
 	struct inv_icm42600_state *st = iio_device_get_drvdata(indio_dev);
-	s16 temp;
+	int16_t temp;
 	int ret;
 
 	if (chan->type != IIO_TEMP)

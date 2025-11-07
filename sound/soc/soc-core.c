@@ -1138,9 +1138,6 @@ sanity_check:
 void snd_soc_remove_pcm_runtime(struct snd_soc_card *card,
 				struct snd_soc_pcm_runtime *rtd)
 {
-	if (!rtd)
-		return;
-
 	lockdep_assert_held(&client_mutex);
 
 	/*

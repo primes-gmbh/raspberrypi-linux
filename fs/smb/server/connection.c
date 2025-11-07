@@ -503,8 +503,7 @@ void ksmbd_conn_transport_destroy(void)
 {
 	mutex_lock(&init_lock);
 	ksmbd_tcp_destroy();
-	ksmbd_rdma_stop_listening();
-	stop_sessions();
 	ksmbd_rdma_destroy();
+	stop_sessions();
 	mutex_unlock(&init_lock);
 }

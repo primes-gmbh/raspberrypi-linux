@@ -3296,13 +3296,13 @@ static int m560_raw_event(struct hid_device *hdev, u8 *data, int size)
 					 120);
 		}
 
-		v = sign_extend32(hid_field_extract(hdev, data + 3, 0, 12), 11);
+		v = hid_snto32(hid_field_extract(hdev, data+3, 0, 12), 12);
 		input_report_rel(hidpp->input, REL_X, v);
 
-		v = sign_extend32(hid_field_extract(hdev, data + 3, 12, 12), 11);
+		v = hid_snto32(hid_field_extract(hdev, data+3, 12, 12), 12);
 		input_report_rel(hidpp->input, REL_Y, v);
 
-		v = sign_extend32(data[6], 7);
+		v = hid_snto32(data[6], 8);
 		if (v != 0)
 			hidpp_scroll_counter_handle_scroll(hidpp->input,
 					&hidpp->vertical_wheel_counter, v);
@@ -4624,8 +4624,6 @@ static const struct hid_device_id hidpp_devices[] = {
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC094) },
 	{ /* Logitech G Pro X Superlight 2 Gaming Mouse over USB */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC09b) },
-	{ /* Logitech G PRO 2 LIGHTSPEED Wireless Mouse over USB */
-	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xc09a) },
 
 	{ /* G935 Gaming Headset */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0x0a87),

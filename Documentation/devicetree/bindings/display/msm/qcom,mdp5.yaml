@@ -60,6 +60,7 @@ properties:
           - const: bus
           - const: core
           - const: vsync
+          - const: lut
           - const: tbu
           - const: tbu_rt
         # MSM8996 has additional iommu clock

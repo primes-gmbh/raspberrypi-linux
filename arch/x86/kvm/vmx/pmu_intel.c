@@ -365,7 +365,7 @@ static int intel_pmu_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 		}
 		break;
 	case MSR_IA32_DS_AREA:
-		if (is_noncanonical_msr_address(data, vcpu))
+		if (is_noncanonical_address(data, vcpu))
 			return 1;
 
 		pmu->ds_area = data;
@@ -605,11 +605,11 @@ static void intel_pmu_reset(struct kvm_vcpu *vcpu)
  */
 static void intel_pmu_legacy_freezing_lbrs_on_pmi(struct kvm_vcpu *vcpu)
 {
-	u64 data = vmx_guest_debugctl_read();
+	u64 data = vmcs_read64(GUEST_IA32_DEBUGCTL);
 
 	if (data & DEBUGCTLMSR_FREEZE_LBRS_ON_PMI) {
 		data &= ~DEBUGCTLMSR_LBR;
-		vmx_guest_debugctl_write(vcpu, data);
+		vmcs_write64(GUEST_IA32_DEBUGCTL, data);
 	}
 }
 
@@ -679,7 +679,7 @@ void vmx_passthrough_lbr_msrs(struct kvm_vcpu *vcpu)
 
 	if (!lbr_desc->event) {
 		vmx_disable_lbr_msrs_passthrough(vcpu);
-		if (vmx_guest_debugctl_read() & DEBUGCTLMSR_LBR)
+		if (vmcs_read64(GUEST_IA32_DEBUGCTL) & DEBUGCTLMSR_LBR)
 			goto warn;
 		if (test_bit(INTEL_PMC_IDX_FIXED_VLBR, pmu->pmc_in_use))
 			goto warn;
@@ -701,7 +701,7 @@ warn:
 
 static void intel_pmu_cleanup(struct kvm_vcpu *vcpu)
 {
-	if (!(vmx_guest_debugctl_read() & DEBUGCTLMSR_LBR))
+	if (!(vmcs_read64(GUEST_IA32_DEBUGCTL) & DEBUGCTLMSR_LBR))
 		intel_pmu_release_guest_lbr_event(vcpu);
 }
 

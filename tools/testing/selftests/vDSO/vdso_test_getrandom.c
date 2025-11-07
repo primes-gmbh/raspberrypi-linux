@@ -242,7 +242,6 @@ static void kselftest(void)
 	pid_t child;
 
 	ksft_print_header();
-	vgetrandom_init();
 	ksft_set_plan(2);
 
 	for (size_t i = 0; i < 1000; ++i) {
@@ -296,6 +295,8 @@ static void usage(const char *argv0)
 
 int main(int argc, char *argv[])
 {
+	vgetrandom_init();
+
 	if (argc == 1) {
 		kselftest();
 		return 0;
@@ -305,9 +306,6 @@ int main(int argc, char *argv[])
 		usage(argv[0]);
 		return 1;
 	}
-
-	vgetrandom_init();
-
 	if (!strcmp(argv[1], "bench-single"))
 		bench_single();
 	else if (!strcmp(argv[1], "bench-multi"))

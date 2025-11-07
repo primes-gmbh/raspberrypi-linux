@@ -218,7 +218,9 @@ static ssize_t flag_store(struct device *dev, const char *page, size_t count,
 	else
 		lim.integrity.flags |= flag;
 
-	err = queue_limits_commit_update_frozen(q, &lim);
+	blk_mq_freeze_queue(q);
+	err = queue_limits_commit_update(q, &lim);
+	blk_mq_unfreeze_queue(q);
 	if (err)
 		return err;
 	return count;

@@ -37,7 +37,6 @@ static const struct hvs_format {
 	u32 pixel_order_hvs5;
 	bool hvs5_only;
 	bool hvs6_only;
-	bool hvs6_swap_chroma_pointers;
 } hvs_formats[] = {
 	{
 		.drm = DRM_FORMAT_XRGB8888,
@@ -110,7 +109,6 @@ static const struct hvs_format {
 		.hvs = HVS_PIXEL_FORMAT_YCBCR_YUV422_3PLANE,
 		.pixel_order = HVS_PIXEL_ORDER_XYCRCB,
 		.pixel_order_hvs5 = HVS_PIXEL_ORDER_XYCRCB,
-		.hvs6_swap_chroma_pointers = true,
 	},
 	{
 		.drm = DRM_FORMAT_YUV444,
@@ -123,7 +121,6 @@ static const struct hvs_format {
 		.hvs = HVS_PIXEL_FORMAT_YCBCR_YUV422_3PLANE,
 		.pixel_order = HVS_PIXEL_ORDER_XYCRCB,
 		.pixel_order_hvs5 = HVS_PIXEL_ORDER_XYCRCB,
-		.hvs6_swap_chroma_pointers = true,
 	},
 	{
 		.drm = DRM_FORMAT_YUV420,
@@ -136,7 +133,6 @@ static const struct hvs_format {
 		.hvs = HVS_PIXEL_FORMAT_YCBCR_YUV420_3PLANE,
 		.pixel_order = HVS_PIXEL_ORDER_XYCRCB,
 		.pixel_order_hvs5 = HVS_PIXEL_ORDER_XYCRCB,
-		.hvs6_swap_chroma_pointers = true,
 	},
 	{
 		.drm = DRM_FORMAT_NV12,
@@ -1874,14 +1870,6 @@ static u32 vc6_plane_get_csc_mode(struct vc4_plane_state *vc4_state)
 	return ret;
 }
 
-static int vc6_get_plane_idx(const struct hvs_format *format, int plane)
-{
-	if (!plane || !format->hvs6_swap_chroma_pointers)
-		return plane;
-
-	return (plane == 1) ? 2 : 1;
-}
-
 static int vc6_plane_mode_set(struct drm_plane *plane,
 			      struct drm_plane_state *state)
 {
@@ -2174,8 +2162,7 @@ static int vc6_plane_mode_set(struct drm_plane *plane,
 	 * TODO: This only covers Raster Scan Order planes
 	 */
 	for (i = 0; i < num_planes; i++) {
-		struct drm_gem_dma_object *bo =
-			drm_fb_dma_get_gem_obj(fb, vc6_get_plane_idx(format, i));
+		struct drm_gem_dma_object *bo = drm_fb_dma_get_gem_obj(fb, i);
 		dma_addr_t paddr = bo->dma_addr + fb->offsets[i] + offsets[i];
 
 		/* Pointer Word 0 */

@@ -483,10 +483,11 @@ void dpp1_set_cursor_position(
 	if (src_y_offset + cursor_height <= 0)
 		cur_en = 0;  /* not visible beyond top edge*/
 
-	REG_UPDATE(CURSOR0_CONTROL,
-			CUR0_ENABLE, cur_en);
+	if (dpp_base->pos.cur0_ctl.bits.cur0_enable != cur_en) {
+		REG_UPDATE(CURSOR0_CONTROL, CUR0_ENABLE, cur_en);
 
-	dpp_base->pos.cur0_ctl.bits.cur0_enable = cur_en;
+		dpp_base->pos.cur0_ctl.bits.cur0_enable = cur_en;
+	}
 }
 
 void dpp1_cnv_set_optional_cursor_attributes(
@@ -517,15 +518,6 @@ void dpp1_dppclk_control(
 			REG_UPDATE(DPP_CONTROL, DPP_CLOCK_ENABLE, 1);
 	} else
 		REG_UPDATE(DPP_CONTROL, DPP_CLOCK_ENABLE, 0);
-}
-
-void dpp_force_disable_cursor(struct dpp *dpp_base)
-{
-	struct dcn10_dpp *dpp = TO_DCN10_DPP(dpp_base);
-
-	/* Force disable cursor */
-	REG_UPDATE(CURSOR0_CONTROL, CUR0_ENABLE, 0);
-	dpp_base->pos.cur0_ctl.bits.cur0_enable = 0;
 }
 
 static const struct dpp_funcs dcn10_dpp_funcs = {

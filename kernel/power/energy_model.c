@@ -722,24 +722,11 @@ free_em_table:
  * Adjustment of CPU performance values after boot, when all CPUs capacites
  * are correctly calculated.
  */
-static void em_adjust_new_capacity(unsigned int cpu, struct device *dev,
-				   struct em_perf_domain *pd)
+static void em_adjust_new_capacity(struct device *dev,
+				   struct em_perf_domain *pd,
+				   u64 max_cap)
 {
-	unsigned long cpu_capacity = arch_scale_cpu_capacity(cpu);
 	struct em_perf_table *em_table;
-	struct em_perf_state *table;
-	unsigned long em_max_perf;
-
-	rcu_read_lock();
-	table = em_perf_state_from_pd(pd);
-	em_max_perf = table[pd->nr_perf_states - 1].performance;
-	rcu_read_unlock();
-
-	if (em_max_perf == cpu_capacity)
-		return;
-
-	pr_debug("updating cpu%d cpu_cap=%lu old capacity=%lu\n", cpu,
-		 cpu_capacity, em_max_perf);
 
 	em_table = em_table_dup(pd);
 	if (!em_table) {
@@ -755,7 +742,10 @@ static void em_adjust_new_capacity(unsigned int cpu, struct device *dev,
 static void em_check_capacity_update(void)
 {
 	cpumask_var_t cpu_done_mask;
-	int cpu, failed_cpus = 0;
+	struct em_perf_state *table;
+	struct em_perf_domain *pd;
+	unsigned long cpu_capacity;
+	int cpu;
 
 	if (!zalloc_cpumask_var(&cpu_done_mask, GFP_KERNEL)) {
 		pr_warn("no free memory\n");
@@ -765,7 +755,7 @@ static void em_check_capacity_update(void)
 	/* Check if CPUs capacity has changed than update EM */
 	for_each_possible_cpu(cpu) {
 		struct cpufreq_policy *policy;
-		struct em_perf_domain *pd;
+		unsigned long em_max_perf;
 		struct device *dev;
 
 		if (cpumask_test_cpu(cpu, cpu_done_mask))
@@ -773,24 +763,40 @@ static void em_check_capacity_update(void)
 
 		policy = cpufreq_cpu_get(cpu);
 		if (!policy) {
-			failed_cpus++;
-			continue;
+			pr_debug("Accessing cpu%d policy failed\n", cpu);
+			schedule_delayed_work(&em_update_work,
+					      msecs_to_jiffies(1000));
+			break;
 		}
 		cpufreq_cpu_put(policy);
 
-		dev = get_cpu_device(cpu);
-		pd = em_pd_get(dev);
+		pd = em_cpu_get(cpu);
 		if (!pd || em_is_artificial(pd))
 			continue;
 
 		cpumask_or(cpu_done_mask, cpu_done_mask,
 			   em_span_cpus(pd));
 
-		em_adjust_new_capacity(cpu, dev, pd);
-	}
+		cpu_capacity = arch_scale_cpu_capacity(cpu);
 
-	if (failed_cpus)
-		schedule_delayed_work(&em_update_work, msecs_to_jiffies(1000));
+		rcu_read_lock();
+		table = em_perf_state_from_pd(pd);
+		em_max_perf = table[pd->nr_perf_states - 1].performance;
+		rcu_read_unlock();
+
+		/*
+		 * Check if the CPU capacity has been adjusted during boot
+		 * and trigger the update for new performance values.
+		 */
+		if (em_max_perf == cpu_capacity)
+			continue;
+
+		pr_debug("updating cpu%d cpu_cap=%lu old capacity=%lu\n",
+			 cpu, cpu_capacity, em_max_perf);
+
+		dev = get_cpu_device(cpu);
+		em_adjust_new_capacity(dev, pd, cpu_capacity);
+	}
 
 	free_cpumask_var(cpu_done_mask);
 }

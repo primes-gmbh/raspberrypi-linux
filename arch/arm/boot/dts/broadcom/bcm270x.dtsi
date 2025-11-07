@@ -239,7 +239,6 @@
 };
 
 &uart0 {
-	compatible = "arm,pl011-axi";
 	/* Enable CTS bug workaround */
 	cts-event-workaround;
 };

@@ -7187,7 +7187,6 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 	int h_nr_delayed = 0;
 	struct cfs_rq *cfs_rq;
 	u64 slice = 0;
-	int ret = 0;
 
 	if (entity_is_task(se)) {
 		p = task_of(se);
@@ -7219,7 +7218,7 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 
 		/* end evaluation on encountering a throttled cfs_rq */
 		if (cfs_rq_throttled(cfs_rq))
-			goto out;
+			return 0;
 
 		/* Don't dequeue parent if it has other entities besides us */
 		if (cfs_rq->load.weight) {
@@ -7262,7 +7261,7 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 
 		/* end evaluation on encountering a throttled cfs_rq */
 		if (cfs_rq_throttled(cfs_rq))
-			goto out;
+			return 0;
 	}
 
 	sub_nr_running(rq, h_nr_queued);
@@ -7274,8 +7273,6 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 	if (unlikely(!was_sched_idle && sched_idle_rq(rq)))
 		rq->next_balance = jiffies;
 
-	ret = 1;
-out:
 	if (p && task_delayed) {
 		SCHED_WARN_ON(!task_sleep);
 		SCHED_WARN_ON(p->on_rq != 1);
@@ -7291,7 +7288,7 @@ out:
 		__block_task(rq, p);
 	}
 
-	return ret;
+	return 1;
 }
 
 /*
@@ -9059,21 +9056,21 @@ simple:
 	return p;
 
 idle:
-	if (rf) {
-		new_tasks = sched_balance_newidle(rq, rf);
+	if (!rf)
+		return NULL;
 
-		/*
-		 * Because sched_balance_newidle() releases (and re-acquires)
-		 * rq->lock, it is possible for any higher priority task to
-		 * appear. In that case we must re-start the pick_next_entity()
-		 * loop.
-		 */
-		if (new_tasks < 0)
-			return RETRY_TASK;
+	new_tasks = sched_balance_newidle(rq, rf);
 
-		if (new_tasks > 0)
-			goto again;
-	}
+	/*
+	 * Because sched_balance_newidle() releases (and re-acquires) rq->lock, it is
+	 * possible for any higher priority task to appear. In that case we
+	 * must re-start the pick_next_entity() loop.
+	 */
+	if (new_tasks < 0)
+		return RETRY_TASK;
+
+	if (new_tasks > 0)
+		goto again;
 
 	/*
 	 * rq is about to be idle, check if we need to update the
@@ -12223,14 +12220,8 @@ static inline bool update_newidle_cost(struct sched_domain *sd, u64 cost)
 		/*
 		 * Track max cost of a domain to make sure to not delay the
 		 * next wakeup on the CPU.
-		 *
-		 * sched_balance_newidle() bumps the cost whenever newidle
-		 * balance fails, and we don't want things to grow out of
-		 * control.  Use the sysctl_sched_migration_cost as the upper
-		 * limit, plus a litle extra to avoid off by ones.
 		 */
-		sd->max_newidle_lb_cost =
-			min(cost, sysctl_sched_migration_cost + 200);
+		sd->max_newidle_lb_cost = cost;
 		sd->last_decay_max_lb_cost = jiffies;
 	} else if (time_after(jiffies, sd->last_decay_max_lb_cost + HZ)) {
 		/*
@@ -12935,17 +12926,10 @@ static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
 
 			t1 = sched_clock_cpu(this_cpu);
 			domain_cost = t1 - t0;
+			update_newidle_cost(sd, domain_cost);
+
 			curr_cost += domain_cost;
 			t0 = t1;
-
-			/*
-			 * Failing newidle means it is not effective;
-			 * bump the cost so we end up doing less of it.
-			 */
-			if (!pulled_task)
-				domain_cost = (3 * sd->max_newidle_lb_cost) / 2;
-
-			update_newidle_cost(sd, domain_cost);
 		}
 
 		/*

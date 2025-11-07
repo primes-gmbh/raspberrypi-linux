@@ -651,10 +651,9 @@ static inline u8 ctxt_virt_addr_bits(struct x86_emulate_ctxt *ctxt)
 }
 
 static inline bool emul_is_noncanonical_address(u64 la,
-						struct x86_emulate_ctxt *ctxt,
-						unsigned int flags)
+						struct x86_emulate_ctxt *ctxt)
 {
-	return !ctxt->ops->is_canonical_addr(ctxt, la, flags);
+	return !__is_canonical_address(la, ctxt_virt_addr_bits(ctxt));
 }
 
 /*
@@ -1734,8 +1733,7 @@ static int __load_segment_descriptor(struct x86_emulate_ctxt *ctxt,
 		if (ret != X86EMUL_CONTINUE)
 			return ret;
 		if (emul_is_noncanonical_address(get_desc_base(&seg_desc) |
-						 ((u64)base3 << 32), ctxt,
-						 X86EMUL_F_DT_LOAD))
+						 ((u64)base3 << 32), ctxt))
 			return emulate_gp(ctxt, err_code);
 	}
 
@@ -2518,8 +2516,8 @@ static int em_sysexit(struct x86_emulate_ctxt *ctxt)
 		ss_sel = cs_sel + 8;
 		cs.d = 0;
 		cs.l = 1;
-		if (emul_is_noncanonical_address(rcx, ctxt, 0) ||
-		    emul_is_noncanonical_address(rdx, ctxt, 0))
+		if (emul_is_noncanonical_address(rcx, ctxt) ||
+		    emul_is_noncanonical_address(rdx, ctxt))
 			return emulate_gp(ctxt, 0);
 		break;
 	}
@@ -3496,8 +3494,7 @@ static int em_lgdt_lidt(struct x86_emulate_ctxt *ctxt, bool lgdt)
 	if (rc != X86EMUL_CONTINUE)
 		return rc;
 	if (ctxt->mode == X86EMUL_MODE_PROT64 &&
-	    emul_is_noncanonical_address(desc_ptr.address, ctxt,
-					 X86EMUL_F_DT_LOAD))
+	    emul_is_noncanonical_address(desc_ptr.address, ctxt))
 		return emulate_gp(ctxt, 0);
 	if (lgdt)
 		ctxt->ops->set_gdt(ctxt, &desc_ptr);
@@ -5104,11 +5101,12 @@ void init_decode_cache(struct x86_emulate_ctxt *ctxt)
 	ctxt->mem_read.end = 0;
 }
 
-int x86_emulate_insn(struct x86_emulate_ctxt *ctxt, bool check_intercepts)
+int x86_emulate_insn(struct x86_emulate_ctxt *ctxt)
 {
 	const struct x86_emulate_ops *ops = ctxt->ops;
 	int rc = X86EMUL_CONTINUE;
 	int saved_dst_type = ctxt->dst.type;
+	bool is_guest_mode = ctxt->ops->is_guest_mode(ctxt);
 
 	ctxt->mem_read.pos = 0;
 
@@ -5156,7 +5154,7 @@ int x86_emulate_insn(struct x86_emulate_ctxt *ctxt, bool check_intercepts)
 				fetch_possible_mmx_operand(&ctxt->dst);
 		}
 
-		if (unlikely(check_intercepts) && ctxt->intercept) {
+		if (unlikely(is_guest_mode) && ctxt->intercept) {
 			rc = emulator_check_intercept(ctxt, ctxt->intercept,
 						      X86_ICPT_PRE_EXCEPT);
 			if (rc != X86EMUL_CONTINUE)
@@ -5185,7 +5183,7 @@ int x86_emulate_insn(struct x86_emulate_ctxt *ctxt, bool check_intercepts)
 				goto done;
 		}
 
-		if (unlikely(check_intercepts) && (ctxt->d & Intercept)) {
+		if (unlikely(is_guest_mode) && (ctxt->d & Intercept)) {
 			rc = emulator_check_intercept(ctxt, ctxt->intercept,
 						      X86_ICPT_POST_EXCEPT);
 			if (rc != X86EMUL_CONTINUE)
@@ -5239,7 +5237,7 @@ int x86_emulate_insn(struct x86_emulate_ctxt *ctxt, bool check_intercepts)
 
 special_insn:
 
-	if (unlikely(check_intercepts) && (ctxt->d & Intercept)) {
+	if (unlikely(is_guest_mode) && (ctxt->d & Intercept)) {
 		rc = emulator_check_intercept(ctxt, ctxt->intercept,
 					      X86_ICPT_POST_MEMACCESS);
 		if (rc != X86EMUL_CONTINUE)

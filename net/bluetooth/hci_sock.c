@@ -118,7 +118,7 @@ static void hci_sock_free_cookie(struct sock *sk)
 	int id = hci_pi(sk)->cookie;
 
 	if (id) {
-		hci_pi(sk)->cookie = 0;
+		hci_pi(sk)->cookie = 0xffffffff;
 		ida_free(&sock_cookie_ida, id);
 	}
 }

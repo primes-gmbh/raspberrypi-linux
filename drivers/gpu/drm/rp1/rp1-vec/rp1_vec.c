@@ -358,9 +358,7 @@ static int rp1vec_connector_get_modes(struct drm_connector *connector)
 				mode->vdisplay	  >>= 1;
 				mode->vsync_start >>= 1;
 				mode->vsync_end	  >>= 1;
-				mode->vtotal      >>= 1;
-				if (mode->vtotal == 262 && tvstd < DRM_MODE_TV_MODE_PAL)
-					mode->vtotal++;
+				mode->vtotal	  >>= 1;
 			} else if (mode->hdisplay == 704 && mode->vtotal == preferred_lines) {
 				mode->type |= DRM_MODE_TYPE_PREFERRED;
 			}
@@ -470,7 +468,6 @@ static int rp1vec_platform_probe(struct platform_device *pdev)
 		return ret;
 	}
 	vec->pdev = pdev;
-	spin_lock_init(&vec->hw_lock);
 
 	for (i = 0; i < RP1VEC_NUM_HW_BLOCKS; i++) {
 		vec->hw_base[i] =

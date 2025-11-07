@@ -52,9 +52,9 @@ static bool nft_rbtree_elem_expired(const struct nft_rbtree_elem *rbe)
 	return nft_set_elem_expired(&rbe->ext);
 }
 
-static const struct nft_set_ext *
-__nft_rbtree_lookup(const struct net *net, const struct nft_set *set,
-		    const u32 *key, unsigned int seq)
+static bool __nft_rbtree_lookup(const struct net *net, const struct nft_set *set,
+				const u32 *key, const struct nft_set_ext **ext,
+				unsigned int seq)
 {
 	struct nft_rbtree *priv = nft_set_priv(set);
 	const struct nft_rbtree_elem *rbe, *interval = NULL;
@@ -65,7 +65,7 @@ __nft_rbtree_lookup(const struct net *net, const struct nft_set *set,
 	parent = rcu_dereference_raw(priv->root.rb_node);
 	while (parent != NULL) {
 		if (read_seqcount_retry(&priv->count, seq))
-			return NULL;
+			return false;
 
 		rbe = rb_entry(parent, struct nft_rbtree_elem, node);
 
@@ -77,9 +77,7 @@ __nft_rbtree_lookup(const struct net *net, const struct nft_set *set,
 			    nft_rbtree_interval_end(rbe) &&
 			    nft_rbtree_interval_start(interval))
 				continue;
-			if (nft_set_elem_active(&rbe->ext, genmask) &&
-			    !nft_rbtree_elem_expired(rbe))
-				interval = rbe;
+			interval = rbe;
 		} else if (d > 0)
 			parent = rcu_dereference_raw(parent->rb_right);
 		else {
@@ -89,46 +87,50 @@ __nft_rbtree_lookup(const struct net *net, const struct nft_set *set,
 			}
 
 			if (nft_rbtree_elem_expired(rbe))
-				return NULL;
+				return false;
 
 			if (nft_rbtree_interval_end(rbe)) {
 				if (nft_set_is_anonymous(set))
-					return NULL;
+					return false;
 				parent = rcu_dereference_raw(parent->rb_left);
 				interval = NULL;
 				continue;
 			}
 
-			return &rbe->ext;
+			*ext = &rbe->ext;
+			return true;
 		}
 	}
 
 	if (set->flags & NFT_SET_INTERVAL && interval != NULL &&
-	    nft_rbtree_interval_start(interval))
-		return &interval->ext;
+	    nft_set_elem_active(&interval->ext, genmask) &&
+	    !nft_rbtree_elem_expired(interval) &&
+	    nft_rbtree_interval_start(interval)) {
+		*ext = &interval->ext;
+		return true;
+	}
 
-	return NULL;
+	return false;
 }
 
 INDIRECT_CALLABLE_SCOPE
-const struct nft_set_ext *
-nft_rbtree_lookup(const struct net *net, const struct nft_set *set,
-		  const u32 *key)
+bool nft_rbtree_lookup(const struct net *net, const struct nft_set *set,
+		       const u32 *key, const struct nft_set_ext **ext)
 {
 	struct nft_rbtree *priv = nft_set_priv(set);
 	unsigned int seq = read_seqcount_begin(&priv->count);
-	const struct nft_set_ext *ext;
+	bool ret;
 
-	ext = __nft_rbtree_lookup(net, set, key, seq);
-	if (ext || !read_seqcount_retry(&priv->count, seq))
-		return ext;
+	ret = __nft_rbtree_lookup(net, set, key, ext, seq);
+	if (ret || !read_seqcount_retry(&priv->count, seq))
+		return ret;
 
 	read_lock_bh(&priv->lock);
 	seq = read_seqcount_begin(&priv->count);
-	ext = __nft_rbtree_lookup(net, set, key, seq);
+	ret = __nft_rbtree_lookup(net, set, key, ext, seq);
 	read_unlock_bh(&priv->lock);
 
-	return ext;
+	return ret;
 }
 
 static bool __nft_rbtree_get(const struct net *net, const struct nft_set *set,
