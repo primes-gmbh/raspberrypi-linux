@@ -5,7 +5,7 @@
     fragment@0 {
         target-path = "/soc";
         __overlay__ {
-            csi@7e801000 {
+            csi@7e800000 {
                 compatible = "primes,bcm2835-unicam-primes-generic-fpga";
                 status = "okay";
                 fpga-mgr = <&fpga_mgr>;
