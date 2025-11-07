@@ -47,17 +47,17 @@ static int efinix_fpga_write_init(struct fpga_manager *mgr,
 	spi_bus_lock(efx->spi->controller);
 	spi_message_init(&msg);
 	spi_message_add_tail(&assert_cs, &msg);
-	dev_info(&efx->spi->dev, "Pulling CRESET to 0\n");
+	dev_info(&efx->spi->dev, "pulling CRESET to 0\n");
 	gpiod_set_value_cansleep(efx->creset, 0);
 	msleep(1);
-	dev_info(&efx->spi->dev, "Pulling CS to 0\n");
+	dev_info(&efx->spi->dev, "pulling CS to 0\n");
 	ret = spi_sync_locked(efx->spi, &msg);
 	if (ret) {
 		dev_err(&efx->spi->dev, "error while driving CS\n");
 		goto fail_unlock;
 	}
 	msleep(1);
-	dev_info(&efx->spi->dev, "Pulling CRESET to 1\n");
+	dev_info(&efx->spi->dev, "pulling CRESET to 1\n");
 	gpiod_set_value_cansleep(efx->creset, 1);
 	msleep(1);
 	goto exit;
@@ -179,7 +179,7 @@ static int efinix_fpga_write_complete(struct fpga_manager *mgr,
 {
 	int res;
 	struct efinix_fpga_mgr *efx = mgr->priv;
-	dev_info(&efx->spi->dev, "Completed writing to FPGA\n");
+	dev_info(&efx->spi->dev, "completed writing to FPGA\n");
 	struct spi_message msg;
 	char buf[32] = { 0 };
 	struct spi_transfer clk_cycles = {
@@ -259,12 +259,12 @@ static int efinix_spi_probe(struct spi_device *spi)
 	efx->cdone = devm_gpiod_get_optional(&spi->dev, "cdone", GPIOD_IN);
 	if (IS_ERR(efx->cdone)) {
 		return dev_err_probe(&efx->spi->dev, PTR_ERR(efx->cdone),
-				     "Failed to get CDONE gpio\n");
+				     "failed to get CDONE gpio\n");
 	}
 	efx->creset = devm_gpiod_get(&spi->dev, "creset", GPIOD_OUT_HIGH);
 	if (IS_ERR(efx->creset)) {
 		return dev_err_probe(&efx->spi->dev, PTR_ERR(efx->creset),
-				     "Failed to get CRESET gpio\n");
+				     "failed to get CRESET gpio\n");
 	}
 	info.name = "Efinix FPGA Manager";
 	info.mops = &efinix_fpga_ops;
@@ -272,7 +272,7 @@ static int efinix_spi_probe(struct spi_device *spi)
 	efx->mgr = devm_fpga_mgr_register_full(&spi->dev, &info);
 	if (IS_ERR(efx->mgr)) {
 		return dev_err_probe(&efx->spi->dev, PTR_ERR(efx->mgr),
-				     "Faile to register FPGA manager");
+				     "failed to register FPGA manager");
 	}
 	dev_set_drvdata(&efx->mgr->dev, efx);
 	return 0;
