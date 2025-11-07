@@ -441,6 +441,7 @@ static void unicam_start_rx(struct unicam_device *unicam)
 	/* Enable clock lane and set up terminations */
 	val = 0;
 	/* CSI2 */
+
 	set_field(&val, 1, UNICAM_CLE);
 	set_field(&val, 1, UNICAM_CLLPE);
 	// !NONCONTINOUS_CLOCK
@@ -459,7 +460,7 @@ static void unicam_start_rx(struct unicam_device *unicam)
 	set_field(&val, 1, UNICAM_DLLPE);
 	set_field(&val, 1, UNICAM_DLTRE);
 	set_field(&val, 1, UNICAM_DLHSE);
-	// }
+	
 	reg_write(unicam, UNICAM_DAT0, val);
 
 	if (unicam->active_data_lanes == 1)
