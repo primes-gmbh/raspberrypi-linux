@@ -1086,7 +1086,7 @@ static int unicam_probe(struct platform_device *pdev)
 
 		struct fpga_image_info info = { 0 };
 		info.dev = dev;
-		info.firmware_name = "efinix-t120.hex";
+		info.firmware_name = "efinix-t120.hex.bin";
 		ret = fpga_mgr_load(mgr, &info);
 		fpga_mgr_put(mgr);
 		if (ret) {

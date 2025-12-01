@@ -29,6 +29,14 @@ struct efinix_fpga_mgr {
 	struct fpga_manager *mgr;
 };
 
+static void efinix_fpga_remove(struct fpga_manager *mgr)
+{
+	struct efinix_fpga_mgr *efx = mgr->priv;
+	gpiod_set_value_cansleep(efx->creset, 0);
+	msleep(1);
+	gpiod_set_value_cansleep(efx->creset, 1);
+}
+
 static int efinix_fpga_write_init(struct fpga_manager *mgr,
 				  struct fpga_image_info *info, const char *buf,
 				  size_t count)
@@ -68,89 +76,25 @@ exit:
 	return ret;
 }
 
-static u8 Hex2Int(char hex)
-{
-	u8 res = -1;
-	if (hex >= '0' && hex <= '9') {
-		res = hex - '0';
-	} else if (hex >= 'a' && hex <= 'f') {
-		res = 10 + hex - 'a';
-	} else if (hex >= 'A' && hex <= 'F') {
-		res = 10 + hex - 'A';
-	}
-	return res;
-}
-
 static int efinix_fpga_write(struct fpga_manager *mgr, const char *buf,
 			     size_t count)
 {
+	int ret = 0;
 	struct efinix_fpga_mgr *efx = mgr->priv;
 	dev_info(&efx->spi->dev, "Writing to FPGA...\n");
-	char *tmp = kmalloc(SZ_4K, GFP_KERNEL);
-	if (!tmp) {
-		return -ENOMEM;
-	}
 	struct spi_message msg;
 	struct spi_transfer xfer = {
-		.tx_buf = tmp,
-		.len = 0,
+		.tx_buf = buf,
+		.len = count,
 		.cs_change = 1,
 	};
 	spi_message_init(&msg);
 	spi_message_add_tail(&xfer, &msg);
-	const char *fw_data = buf;
-	const char *fw_data_end = fw_data + count;
-	int ret = 0;
-	size_t line = 1;
-	while (fw_data < fw_data_end - 2) {
-		if (*fw_data != '\n') {
-			u8 upper = Hex2Int(fw_data[0]);
-			if (upper == -1) {
-				ret = -EINVAL;
-				dev_err(&efx->spi->dev,
-					"Error while reading fpga hex file (line:%zu)\n",
-					line);
-				goto fail_unlock;
-			}
-			u8 lower = Hex2Int(fw_data[1]);
-			if (lower == -1) {
-				ret = -EINVAL;
-				dev_err(&efx->spi->dev,
-					"Error while reading fpga hex file (line:%zu)\n",
-					line);
-				goto fail_unlock;
-			}
-			if (fw_data[2] != '\n' && fw_data[2] != '\0') {
-				ret = -EINVAL;
-				dev_err(&efx->spi->dev,
-					"Error while reading fpga hex file (line:%zu)\n",
-					line);
-				goto fail_unlock;
-			}
-			tmp[xfer.len] = (upper << 4) | lower;
-			xfer.len++;
-			if (xfer.len == sizeof(tmp)) {
-				ret = spi_sync_locked(efx->spi, &msg);
-				xfer.len = 0;
-				if (ret) {
-					dev_err(&efx->spi->dev,
-						"SPI error in firmware write: %d\n",
-						ret);
-					goto fail_unlock;
-				}
-			}
-			fw_data += 2;
-		}
-		fw_data++;
-		line++;
-	}
-	if (xfer.len) {
-		ret = spi_sync_locked(efx->spi, &msg);
-		if (ret) {
-			dev_err(&efx->spi->dev,
-				"SPI error in firmware write: %d\n", ret);
-			goto fail_unlock;
-		}
+	ret = spi_sync_locked(efx->spi, &msg);
+	if (ret) {
+		dev_err(&efx->spi->dev, "SPI error in firmware write: %d\n",
+			ret);
+		goto fail_unlock;
 	}
 	goto exit;
 
@@ -158,7 +102,6 @@ fail_unlock:
 	spi_bus_unlock(efx->spi->controller);
 
 exit:
-	kfree(tmp);
 	return ret;
 }
 
@@ -244,6 +187,7 @@ static const struct fpga_manager_ops efinix_fpga_ops = {
 	.write_init = efinix_fpga_write_init,
 	.write = efinix_fpga_write,
 	.write_complete = efinix_fpga_write_complete,
+	.fpga_remove = efinix_fpga_remove,
 	.groups = efinix_groups,
 };
 
