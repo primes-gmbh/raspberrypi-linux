@@ -120,8 +120,13 @@ struct unicam_device {
 
 	u64 start_time;
 	u64 total_frames;
+	u64 frames_lost;
+	bool dummy_scheduled;
+	char *frame_lost_reason;
 
 	struct i2c_client *sensor_client;
+
+	struct fpga_manager *fpga_mgr;
 };
 
 static int unicam_log_status(struct unicam_device *unicam);
@@ -243,7 +248,7 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	struct unicam_device *unicam = dev;
 	u32 ista, sta;
 	u32 ibwp, ibsa0, ibea0;
-	bool fe;
+	bool fs, fe, lci;
 
 	ibwp = reg_read(unicam, UNICAM_IBWP);
 	sta = reg_read(unicam, UNICAM_STA);
@@ -255,6 +260,49 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	ibsa0 = reg_read(dev, UNICAM_IBSA0);
 	ibea0 = reg_read(dev, UNICAM_IBEA0);
 
+	if (sta & UNICAM_SBE) {
+		dev_err(&unicam->pdev->dev, "short packet bit error");
+	}
+	if (sta & UNICAM_PBE) {
+		dev_err(&unicam->pdev->dev, "payload bit error");
+	}
+	if (sta & UNICAM_HOE) {
+		dev_err(&unicam->pdev->dev, "header overflow error");
+	}
+	if (sta & UNICAM_PLE) {
+		dev_err(&unicam->pdev->dev, "payload overflow error");
+	}
+	if (sta & UNICAM_SSC) {
+		dev_err(&unicam->pdev->dev, "start-of-frame sequence error");
+	}
+	if (sta & UNICAM_CRCE) {
+		dev_err(&unicam->pdev->dev, "crc error");
+	}
+	if (sta & UNICAM_IFO) {
+		dev_err(&unicam->pdev->dev, "input fifo overflow");
+	}
+	if (sta & UNICAM_OFO) {
+		dev_err(&unicam->pdev->dev, "output fifo overflow");
+	}
+	if (sta & UNICAM_BFO) {
+		dev_err(&unicam->pdev->dev, "byte fifo overflow");
+	}
+	if (sta & UNICAM_DL) {
+		dev_err(&unicam->pdev->dev, "data lost");
+	}
+	if (sta & UNICAM_PS) {
+		dev_err(&unicam->pdev->dev, "preamble short");
+	}
+	if (sta & UNICAM_FSI_S) {
+		dev_err(&unicam->pdev->dev, "frame start interrupt status");
+	}
+	if (sta & UNICAM_FEI_S) {
+		dev_err(&unicam->pdev->dev, "frame end interrupt status");
+	}
+	if (sta & UNICAM_LCI_S) {
+		dev_err(&unicam->pdev->dev, "line count interrupt status");
+	}
+
 	if (!(sta & (UNICAM_IS | UNICAM_PI0))) {
 		return IRQ_HANDLED;
 	}
@@ -263,6 +311,8 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	 * Look for either the Frame End interrupt or the Packet Capture status
 	 * to signal a frame end.
 	 */
+	fs = !!(ista & UNICAM_FSI);
+	lci = !!(ista & UNICAM_LCI);
 	fe = (ista & UNICAM_FEI || sta & UNICAM_PI0);
 
 	/*
@@ -272,50 +322,55 @@ static irqreturn_t unicam_isr(int irq, void *dev)
          * buffer forever.
          */
 	if (fe && unicam->frame_started) {
-		unicam->frame_started = false;
 		unicam->total_frames++;
 		if (unicam->cur_block &&
 		    unicam->cur_block != unicam->next_block) {
 			unicam->cur_block->bytes_used = unicam->cur_block->size;
 			unicam_process_block_done(unicam);
-			unicam->cur_block = unicam->next_block;
-			unicam->next_block = NULL;
-		} else {
-			unicam->cur_block = unicam->next_block;
 		}
+		unicam->cur_block = unicam->next_block;
+		unicam->frame_started = false;
 	}
-
-	bool scheduled_dummy_buffer = false;
-	if (ista & UNICAM_FSI) {
-		unicam->frame_started = true;
+	if (fs) {
+		if (unicam->dummy_scheduled) {
+			dev_warn(&unicam->pdev->dev,
+				 "frame lost - reason: %s\n",
+				 unicam->frame_lost_reason);
+		}
 		if (!unicam->next_block ||
 		    unicam->cur_block == unicam->next_block) {
+			unicam->dummy_scheduled = true;
+			unicam->frame_lost_reason = "unknown";
 			unicam_schedule_dummy_block(unicam);
-			scheduled_dummy_buffer = true;
 		} else if (unicam->cur_block) {
-			dev_warn(&unicam->pdev->dev, "lost some data\n");
+			dev_warn(
+				&unicam->pdev->dev,
+				"frame lost fs: %d lci: %d fe: %d reason: %s\n",
+				fs, lci, fe, unicam->frame_lost_reason);
 			unicam->cur_block->bytes_used = 0;
 			unicam_process_block_done(unicam);
 			unicam->cur_block = unicam->next_block;
 			unicam->next_block = NULL;
+			unicam->frames_lost++;
 		}
+		unicam->frame_started = true;
 	}
 
 	// Schedule the next block
-	char *reason = "unknown";
-	if (ista & (UNICAM_FSI | UNICAM_LCI) && !fe) {
+	if ((fs || lci) && !fe) {
 		spin_lock(&unicam->list_lock);
 		if (!list_empty(&unicam->block_list) && !unicam->next_block) {
 			unicam_schedule_next_block(unicam);
-			scheduled_dummy_buffer = false;
+			unicam->dummy_scheduled = false;
+			unicam->frame_lost_reason = "unknown";
 		} else if (list_empty(&unicam->block_list)) {
-			reason = "block_list is empty";
+			unicam->frame_lost_reason = "block_list is empty";
 		} else if (unicam->next_block) {
-			reason = "next_block is not empty";
+			unicam->frame_lost_reason = "next_block is not empty";
 		}
 		spin_unlock(&unicam->list_lock);
 	} else {
-		reason = "FSI and FEI at the same time";
+		unicam->frame_lost_reason = "FSI and FEI at the same time";
 	}
 	return IRQ_HANDLED;
 }
@@ -356,7 +411,7 @@ static void unicam_start_rx(struct unicam_device *unicam)
 	dev_info(
 		&unicam->pdev->dev,
 		"stride size: %d bytes, buffer_size: %zu bytes -> setting line_int_freq to %d\n",
-		unicam->vres, unicam->queue[0].fileio.block_size,
+		unicam->hres, unicam->queue[0].fileio.block_size,
 		line_int_freq);
 
 	/* Enable lane clocks */
@@ -460,7 +515,7 @@ static void unicam_start_rx(struct unicam_device *unicam)
 	set_field(&val, 1, UNICAM_DLLPE);
 	set_field(&val, 1, UNICAM_DLTRE);
 	set_field(&val, 1, UNICAM_DLHSE);
-	
+
 	reg_write(unicam, UNICAM_DAT0, val);
 
 	if (unicam->active_data_lanes == 1)
@@ -805,29 +860,17 @@ static const struct iio_dma_buffer_ops unicam_iio_dma_buffer_ops = {
 
 static const struct iio_chan_spec unicam_iio_channels[] = {
   {
-    .type = IIO_VOLTAGE,
+    .type = IIO_COUNT,
     .scan_index = 0,
     .scan_type = {
       .sign = 'u',
-      .realbits = 16,
-      .storagebits = 16,
-      .shift = 0,
-      .repeat = 2,
-      .endianness = IIO_LE,
-    },
-  },
-  {
-    .type = IIO_COUNT,
-    .scan_index = 1,
-    .scan_type = {
-      .sign = 'u',
-      .realbits = 32,
-      .storagebits = 32,
+      .realbits = 8,
+      .storagebits = 8,
       .shift = 0,
       .repeat = 1,
       .endianness = IIO_LE,
     },
-  },
+  }
 };
 
 struct primes_attribute {
@@ -974,6 +1017,17 @@ PRIMES_DEVICE_ATTR(C_MIPI_VBP)
 PRIMES_DEVICE_ATTR(C_MIPI_VACT)
 PRIMES_DEVICE_ATTR(C_MIPI_VFP)
 
+static ssize_t primes_frames_lost_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct platform_device *pdev = container_of(
+		indio_dev->dev.parent, struct platform_device, dev);
+	struct unicam_device *unicam = platform_get_drvdata(pdev);
+	return sprintf(buf, "%lld\n", unicam->frames_lost);
+}
+static IIO_DEVICE_ATTR(frames_lost, 0644, primes_frames_lost_show, NULL, 0);
+
 static struct attribute *my_attributes[] = {
 	&iio_dev_attr_C_TEST_PATTERN_CONFIG.dev_attr.attr,
 	&iio_dev_attr_C_MIPI_TX_VC.dev_attr.attr,
@@ -993,6 +1047,7 @@ static struct attribute *my_attributes[] = {
 	&iio_dev_attr_C_MIPI_VBP.dev_attr.attr,
 	&iio_dev_attr_C_MIPI_VACT.dev_attr.attr,
 	&iio_dev_attr_C_MIPI_VFP.dev_attr.attr,
+	&iio_dev_attr_frames_lost.dev_attr.attr,
 	NULL
 };
 
@@ -1068,6 +1123,11 @@ static int unicam_probe(struct platform_device *pdev)
 	dev = &pdev->dev;
 	dev_info(dev, "unicam_probe\n");
 
+	unicam = kzalloc(sizeof(*unicam), GFP_KERNEL);
+	if (!unicam) {
+		return -ENOMEM;
+	}
+
 	if (!do_not_flash_fpga) {
 		struct device_node *mgr_np;
 		struct fpga_manager *mgr;
@@ -1083,21 +1143,16 @@ static int unicam_probe(struct platform_device *pdev)
 			dev_err(dev, "failed to get FPGA manager: %pe\n", mgr);
 			return -EPROBE_DEFER;
 		}
-
 		struct fpga_image_info info = { 0 };
 		info.dev = dev;
 		info.firmware_name = "efinix-t120.hex.bin";
 		ret = fpga_mgr_load(mgr, &info);
-		fpga_mgr_put(mgr);
 		if (ret) {
+			fpga_mgr_put(mgr);
 			dev_err(dev, "failed to program FPGA");
 			return ret;
 		}
-	}
-
-	unicam = kzalloc(sizeof(*unicam), GFP_KERNEL);
-	if (!unicam) {
-		return -ENOMEM;
+		unicam->fpga_mgr = mgr;
 	}
 
 	unicam->pdev = pdev;
@@ -1181,6 +1236,7 @@ static int unicam_probe(struct platform_device *pdev)
 		ret = -EINVAL;
 		goto err_unicam_put;
 	}
+	memset(unicam->dummy_dma_vaddr, 0xab, unicam->dummy_dma_size);
 
 	INIT_LIST_HEAD(&unicam->block_list);
 	spin_lock_init(&unicam->list_lock);
@@ -1247,6 +1303,15 @@ static void unicam_remove(struct platform_device *pdev)
 		}
 		if (unicam->sensor_client) {
 			i2c_unregister_device(unicam->sensor_client);
+		}
+		if (unicam->fpga_mgr) {
+			if (!do_not_flash_fpga) {
+				if (unicam->fpga_mgr->mops->fpga_remove) {
+					unicam->fpga_mgr->mops->fpga_remove(
+						unicam->fpga_mgr);
+				}
+			}
+			fpga_mgr_put(unicam->fpga_mgr);
 		}
 		kfree(unicam);
 	}
