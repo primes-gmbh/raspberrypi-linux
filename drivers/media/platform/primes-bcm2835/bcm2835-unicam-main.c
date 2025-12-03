@@ -252,13 +252,6 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 
 	ibwp = reg_read(unicam, UNICAM_IBWP);
 	sta = reg_read(unicam, UNICAM_STA);
-	/* Write value back to clear the interrupts */
-	reg_write(unicam, UNICAM_STA, sta);
-	ista = reg_read(unicam, UNICAM_ISTA);
-	/* Write value back to clear the interrupts */
-	reg_write(unicam, UNICAM_ISTA, ista);
-	ibsa0 = reg_read(dev, UNICAM_IBSA0);
-	ibea0 = reg_read(dev, UNICAM_IBEA0);
 
 	if (sta & UNICAM_SBE) {
 		dev_err(&unicam->pdev->dev, "short packet bit error");
@@ -294,7 +287,9 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 		dev_err(&unicam->pdev->dev, "preamble short");
 	}
 	if (sta & UNICAM_FSI_S) {
-		dev_err(&unicam->pdev->dev, "frame start interrupt status");
+		dev_err(&unicam->pdev->dev,
+			"frame start interrupt status, sta: %08x ista: %08x frame_started: %d",
+			sta, ista, unicam->frame_started);
 	}
 	if (sta & UNICAM_FEI_S) {
 		dev_err(&unicam->pdev->dev, "frame end interrupt status");
@@ -302,6 +297,14 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	if (sta & UNICAM_LCI_S) {
 		dev_err(&unicam->pdev->dev, "line count interrupt status");
 	}
+
+	/* Write value back to clear the interrupts */
+	reg_write(unicam, UNICAM_STA, sta);
+	ista = reg_read(unicam, UNICAM_ISTA);
+	/* Write value back to clear the interrupts */
+	reg_write(unicam, UNICAM_ISTA, ista);
+	ibsa0 = reg_read(dev, UNICAM_IBSA0);
+	ibea0 = reg_read(dev, UNICAM_IBEA0);
 
 	if (!(sta & (UNICAM_IS | UNICAM_PI0))) {
 		return IRQ_HANDLED;
@@ -1127,6 +1130,7 @@ static int unicam_probe(struct platform_device *pdev)
 	if (!unicam) {
 		return -ENOMEM;
 	}
+	unicam->frame_lost_reason = "unknown";
 
 	if (!do_not_flash_fpga) {
 		struct device_node *mgr_np;
