@@ -79,29 +79,24 @@ exit:
 static int efinix_fpga_write(struct fpga_manager *mgr, const char *buf,
 			     size_t count)
 {
-	int ret = 0;
+	int ret;
 	struct efinix_fpga_mgr *efx = mgr->priv;
-	dev_info(&efx->spi->dev, "Writing to FPGA...\n");
-	struct spi_message msg;
-	struct spi_transfer xfer = {
+	struct spi_transfer write_xfer = {
 		.tx_buf = buf,
 		.len = count,
-		.cs_change = 1,
+		.cs_change = 1, /* Keep CS asserted */
 	};
-	spi_message_init(&msg);
-	spi_message_add_tail(&xfer, &msg);
-	ret = spi_sync_locked(efx->spi, &msg);
+	struct spi_message message;
+
+	dev_info(&efx->spi->dev, "Writing to FPGA... (count: %ld bytes)\n",
+		 count);
+
+	spi_message_init_with_transfers(&message, &write_xfer, 1);
+	ret = spi_sync_locked(efx->spi, &message);
 	if (ret) {
-		dev_err(&efx->spi->dev, "SPI error in firmware write: %d\n",
-			ret);
-		goto fail_unlock;
+		dev_err(&mgr->dev, "SPI error in firmware write: %d\n", ret);
+		spi_bus_unlock(efx->spi->controller);
 	}
-	goto exit;
-
-fail_unlock:
-	spi_bus_unlock(efx->spi->controller);
-
-exit:
 	return ret;
 }
 
