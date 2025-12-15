@@ -87,10 +87,8 @@ static int efinix_fpga_write(struct fpga_manager *mgr, const char *buf,
 		.cs_change = 1, /* Keep CS asserted */
 	};
 	struct spi_message message;
-
 	dev_info(&efx->spi->dev, "Writing to FPGA... (count: %ld bytes)\n",
 		 count);
-
 	spi_message_init_with_transfers(&message, &write_xfer, 1);
 	ret = spi_sync_locked(efx->spi, &message);
 	if (ret) {

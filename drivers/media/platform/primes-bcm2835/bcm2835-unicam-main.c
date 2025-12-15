@@ -54,24 +54,9 @@
 #define MIN_VPU_CLOCK_RATE (250 * 1000 * 1000)
 
 enum {
-	PRIMES_I2C_REG_C_TEST_PATTERN_CONFIG = 0x81,
-	PRIMES_I2C_REG_C_MIPI_TX_VC = 0xa8,
-	PRIMES_I2C_REG_C_MIPI_TX_TYPE = 0xa9,
-	PRIMES_I2C_REG_C_MIPI_TX_LANES = 0xaa,
-	PRIMES_I2C_REG_C_MIPI_TX_FRAME_MODE = 0xab,
-	PRIMES_I2C_REG_C_MIPI_TX_HRES = 0xac,
-	PRIMES_I2C_REG_C_MIPI_TX_ULPS_ENTER = 0xae,
-	PRIMES_I2C_REG_C_MIPI_TX_ULPS_EXIT = 0xaf,
-	PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_ENTER = 0xb0,
-	PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_EXIT = 0xb1,
-	PRIMES_I2C_REG_C_MIPI_HSA = 0xb2,
-	PRIMES_I2C_REG_C_MIPI_HBP = 0xb4,
-	PRIMES_I2C_REG_C_MIPI_HACT = 0xb6,
-	PRIMES_I2C_REG_C_MIPI_HFP = 0xb8,
-	PRIMES_I2C_REG_C_MIPI_VSA = 0xba,
-	PRIMES_I2C_REG_C_MIPI_VBP = 0xbc,
-	PRIMES_I2C_REG_C_MIPI_VACT = 0xbe,
-	PRIMES_I2C_REG_C_MIPI_VFP = 0xc0,
+	PRIMES_FPGA_I2C_ADDR_MIPI_LANES = 0xaa,
+	PRIMES_FPGA_I2C_ADDR_MIPI_HACT = 0xb6,
+	PRIMES_FPGA_I2C_ADDR_MIPI_VACT = 0xbe,
 };
 
 /*
@@ -124,7 +109,8 @@ struct unicam_device {
 	bool dummy_scheduled;
 	char *frame_lost_reason;
 
-	struct i2c_client *sensor_client;
+	struct i2c_client *fpga_i2c_mipi_config;
+	struct i2c_client *fpga_i2c_amplifier_config;
 
 	struct fpga_manager *fpga_mgr;
 };
@@ -630,13 +616,13 @@ static int unicam_log_status(struct unicam_device *unicam)
 	return 0;
 }
 
-static u8 primes_read_mipi_tx_lanes(struct unicam_device *unicam)
+static u8 primes_read_mipi_lanes(struct unicam_device *unicam)
 {
 	u8 res = 2;
-	if (unicam->sensor_client) {
+	if (unicam->fpga_i2c_mipi_config) {
 		s32 data = i2c_smbus_read_byte_data(
-				   unicam->sensor_client,
-				   PRIMES_I2C_REG_C_MIPI_TX_LANES) +
+				   unicam->fpga_i2c_mipi_config,
+				   PRIMES_FPGA_I2C_ADDR_MIPI_LANES) +
 			   1;
 		if (data < 0) {
 			dev_warn(
@@ -649,19 +635,20 @@ static u8 primes_read_mipi_tx_lanes(struct unicam_device *unicam)
 	return res;
 }
 
-static u16 primes_read_mipi_tx_hres(struct unicam_device *unicam)
+static u16 primes_read_mipi_hact(struct unicam_device *unicam)
 {
 	u16 res = 1024;
-	if (unicam->sensor_client) {
+	if (unicam->fpga_i2c_mipi_config) {
 		s32 data_0 = i2c_smbus_read_byte_data(
-			unicam->sensor_client, PRIMES_I2C_REG_C_MIPI_TX_HRES);
+			unicam->fpga_i2c_mipi_config,
+			PRIMES_FPGA_I2C_ADDR_MIPI_HACT);
 		s32 data_1 = i2c_smbus_read_byte_data(
-			unicam->sensor_client,
-			PRIMES_I2C_REG_C_MIPI_TX_HRES + 1);
+			unicam->fpga_i2c_mipi_config,
+			PRIMES_FPGA_I2C_ADDR_MIPI_HACT + 1);
 		if (data_0 < 0 || data_1 < 0) {
 			dev_warn(
 				&unicam->pdev->dev,
-				"Could not read C_MIPI_TX_HRES from FPGA, using default of 1024");
+				"Could not read HACT from FPGA, using default of 1024");
 		}
 		res = data_0 << 8 | data_1;
 	}
@@ -671,11 +658,13 @@ static u16 primes_read_mipi_tx_hres(struct unicam_device *unicam)
 static u16 primes_read_mipi_vact(struct unicam_device *unicam)
 {
 	u16 res = 4096;
-	if (unicam->sensor_client) {
+	if (unicam->fpga_i2c_mipi_config) {
 		s32 data_0 = i2c_smbus_read_byte_data(
-			unicam->sensor_client, PRIMES_I2C_REG_C_MIPI_VACT);
+			unicam->fpga_i2c_mipi_config,
+			PRIMES_FPGA_I2C_ADDR_MIPI_VACT);
 		s32 data_1 = i2c_smbus_read_byte_data(
-			unicam->sensor_client, PRIMES_I2C_REG_C_MIPI_VACT + 1);
+			unicam->fpga_i2c_mipi_config,
+			PRIMES_FPGA_I2C_ADDR_MIPI_VACT + 1);
 		if (data_0 < 0 || data_1 < 0) {
 			dev_warn(
 				&unicam->pdev->dev,
@@ -720,25 +709,42 @@ static struct i2c_client *create_i2c_client_from_node(struct device *dev,
 	return client;
 }
 
-static int primes_connect_i2c_client(struct unicam_device *unicam)
+static int primes_connect_i2c_clients(struct unicam_device *unicam)
 {
 	int ret = 0;
-	struct device_node *sensor_np =
-		of_get_child_by_name(unicam->pdev->dev.of_node, "sensor");
-	if (!sensor_np) {
-		dev_err(&unicam->pdev->dev,
-			"missing 'sensor' property in CSI node\n");
-		return -EINVAL;
+	struct {
+		const char *node_name;
+		struct i2c_client **client;
+	} nodes[] = {
+		{ "fpga-i2c-mipi-config", &unicam->fpga_i2c_mipi_config },
+		{ "fpga-i2c-amplifier-config",
+		  &unicam->fpga_i2c_amplifier_config },
+	};
+	for (int i = 0; i < ARRAY_SIZE(nodes); i++) {
+		struct device_node *sensor_np = of_get_child_by_name(
+			unicam->pdev->dev.of_node, nodes[i].node_name);
+		if (!sensor_np) {
+			dev_err(&unicam->pdev->dev,
+				"missing '%s' property in CSI node\n",
+				nodes[i].node_name);
+			return -EINVAL;
+		}
+		*nodes[i].client = create_i2c_client_from_node(
+			&unicam->pdev->dev, sensor_np);
+		if (IS_ERR(*nodes[i].client)) {
+			dev_warn(&unicam->pdev->dev,
+				 "failed to create i2c client from node\n");
+			*nodes[i].client = NULL;
+			ret = 1;
+		}
+		of_node_put(sensor_np);
+		if (ret == 1) {
+			break;
+		}
 	}
-	unicam->sensor_client =
-		create_i2c_client_from_node(&unicam->pdev->dev, sensor_np);
-	if (IS_ERR(unicam->sensor_client)) {
-		dev_warn(&unicam->pdev->dev,
-			 "failed to create i2c client from node\n");
-		unicam->sensor_client = NULL;
-		ret = 1;
+	if (ret == 1) {
+		i2c_unregister_device(unicam->fpga_i2c_amplifier_config);
 	}
-	of_node_put(sensor_np);
 	return ret;
 }
 
@@ -753,8 +759,8 @@ static int unicam_start_streaming(struct unicam_device *unicam)
 		goto err_streaming;
 	}
 
-	unicam->active_data_lanes = primes_read_mipi_tx_lanes(unicam);
-	unicam->hres = primes_read_mipi_tx_hres(unicam);
+	unicam->active_data_lanes = primes_read_mipi_lanes(unicam);
+	unicam->hres = primes_read_mipi_hact(unicam);
 	unicam->vres = primes_read_mipi_vact(unicam);
 
 	dev_info(&unicam->pdev->dev, "Running with %u data lanes\n",
@@ -882,6 +888,48 @@ struct primes_attribute {
 	bool two_bytes;
 };
 
+static int primes_write_i2c_u8(struct i2c_client *client, u8 addr, u16 val)
+{
+	return i2c_smbus_write_byte_data(client, addr, val & 0xff);
+}
+
+static int primes_read_i2c_u8(struct i2c_client *client, u8 addr)
+{
+	return i2c_smbus_read_byte_data(client, addr);
+}
+
+static int primes_write_i2c_u16(struct i2c_client *client, u8 addr, u16 val)
+{
+	int ret;
+	ret = i2c_smbus_write_byte_data(client, addr, val >> 8);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = i2c_smbus_write_byte_data(client, addr + 1, val);
+	if (ret < 0) {
+	}
+	return ret;
+}
+
+static int primes_read_i2c_u16(struct i2c_client *client, u8 addr)
+{
+	u16 val, val2;
+	val = i2c_smbus_read_byte_data(client, addr);
+	if (val < 0) {
+		return val;
+	}
+	val <<= 8;
+	val2 = i2c_smbus_read_byte_data(client, addr + 1);
+	if (val2 < 0) {
+		return val2;
+	}
+	return val | val2;
+}
+
+#define DEV2UNI(DEV)                                                       \
+	platform_get_drvdata(container_of(dev_to_iio_dev(DEV)->dev.parent, \
+					  struct platform_device, DEV))
+
 static ssize_t primes_attr_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -890,26 +938,15 @@ static ssize_t primes_attr_show(struct device *dev,
 		container_of(attr, struct iio_dev_attr, dev_attr);
 	struct primes_attribute *pattr =
 		(struct primes_attribute *)iioattr->address;
-	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
-	struct platform_device *pdev = container_of(
-		indio_dev->dev.parent, struct platform_device, dev);
-	struct unicam_device *unicam = platform_get_drvdata(pdev);
-	if (!unicam->sensor_client) {
+	struct unicam_device *unicam = DEV2UNI(dev);
+	struct i2c_client *client = unicam->fpga_i2c_mipi_config;
+	if (!client) {
 		return -ENXIO;
 	}
 	if (pattr->two_bytes) {
-		ret = i2c_smbus_read_byte_data(unicam->sensor_client,
-					       pattr->addr)
-		      << 8;
-		if (ret < 0) {
-			dev_err(dev, "I2C read failed: %d\n", ret);
-			return ret;
-		}
-		ret |= i2c_smbus_read_byte_data(unicam->sensor_client,
-						pattr->addr + 1);
+		ret = primes_read_i2c_u16(client, pattr->addr);
 	} else {
-		ret |= i2c_smbus_read_byte_data(unicam->sensor_client,
-						pattr->addr);
+		ret = primes_read_i2c_u8(client, pattr->addr);
 	}
 	if (ret < 0) {
 		dev_err(dev, "I2C read failed: %d\n", ret);
@@ -927,28 +964,18 @@ static ssize_t primes_attr_store(struct device *dev,
 		container_of(attr, struct iio_dev_attr, dev_attr);
 	struct primes_attribute *pattr =
 		(struct primes_attribute *)iioattr->address;
-	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
-	struct platform_device *pdev = container_of(
-		indio_dev->dev.parent, struct platform_device, dev);
-	struct unicam_device *unicam = platform_get_drvdata(pdev);
-	if (!unicam->sensor_client) {
+	struct unicam_device *unicam = DEV2UNI(dev);
+	struct i2c_client *client = unicam->fpga_i2c_mipi_config;
+	if (!client) {
 		return -ENXIO;
 	}
 	u16 val;
 	if (kstrtou16(buf, 10, &val))
 		return -EINVAL;
 	if (pattr->two_bytes) {
-		ret = i2c_smbus_write_byte_data(unicam->sensor_client,
-						pattr->addr, val >> 8);
-		if (ret < 0) {
-			dev_err(dev, "I2C write failed: %d\n", ret);
-			return ret;
-		}
-		ret = i2c_smbus_write_byte_data(unicam->sensor_client,
-						pattr->addr + 1, val);
+		ret = primes_write_i2c_u16(client, pattr->addr, val);
 	} else {
-		ret = i2c_smbus_write_byte_data(unicam->sensor_client,
-						pattr->addr, val);
+		ret = primes_write_i2c_u8(client, pattr->addr, val);
 	}
 	if (ret < 0) {
 		dev_err(dev, "I2C write failed: %d\n", ret);
@@ -957,100 +984,155 @@ static ssize_t primes_attr_store(struct device *dev,
 	return len;
 }
 
-static const struct primes_attribute pattrs[] = {
-	[PRIMES_I2C_REG_C_TEST_PATTERN_CONFIG] = { .addr = PRIMES_I2C_REG_C_TEST_PATTERN_CONFIG,
-						   .two_bytes = 0 },
-	[PRIMES_I2C_REG_C_MIPI_TX_VC] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_VC,
-					  .two_bytes = 0 },
-	[PRIMES_I2C_REG_C_MIPI_TX_TYPE] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_TYPE,
-					    .two_bytes = 0 },
-	[PRIMES_I2C_REG_C_MIPI_TX_LANES] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_LANES,
-					     .two_bytes = 0 },
-	[PRIMES_I2C_REG_C_MIPI_TX_FRAME_MODE] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_FRAME_MODE,
-						  .two_bytes = 0 },
-	[PRIMES_I2C_REG_C_MIPI_TX_HRES] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_HRES,
-					    .two_bytes = 1 },
-	[PRIMES_I2C_REG_C_MIPI_TX_ULPS_ENTER] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_ULPS_ENTER,
-						  .two_bytes = 0 },
-	[PRIMES_I2C_REG_C_MIPI_TX_ULPS_EXIT] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_ULPS_EXIT,
-						 .two_bytes = 1 },
-	[PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_ENTER] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_ENTER,
-						      .two_bytes = 0 },
-	[PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_EXIT] = { .addr = PRIMES_I2C_REG_C_MIPI_TX_ULPS_CLK_EXIT,
-						     .two_bytes = 0 },
-	[PRIMES_I2C_REG_C_MIPI_HSA] = { .addr = PRIMES_I2C_REG_C_MIPI_HSA,
-					.two_bytes = 1 },
-	[PRIMES_I2C_REG_C_MIPI_HBP] = { .addr = PRIMES_I2C_REG_C_MIPI_HBP,
-					.two_bytes = 1 },
-	[PRIMES_I2C_REG_C_MIPI_HACT] = { .addr = PRIMES_I2C_REG_C_MIPI_HACT,
-					 .two_bytes = 1 },
-	[PRIMES_I2C_REG_C_MIPI_HFP] = { .addr = PRIMES_I2C_REG_C_MIPI_HFP,
-					.two_bytes = 1 },
-	[PRIMES_I2C_REG_C_MIPI_VSA] = { .addr = PRIMES_I2C_REG_C_MIPI_VSA,
-					.two_bytes = 1 },
-	[PRIMES_I2C_REG_C_MIPI_VBP] = { .addr = PRIMES_I2C_REG_C_MIPI_VBP,
-					.two_bytes = 1 },
-	[PRIMES_I2C_REG_C_MIPI_VACT] = { .addr = PRIMES_I2C_REG_C_MIPI_VACT,
-					 .two_bytes = 1 },
-	[PRIMES_I2C_REG_C_MIPI_VFP] = { .addr = PRIMES_I2C_REG_C_MIPI_VFP,
-					.two_bytes = 1 },
-};
-
-#define PRIMES_DEVICE_ATTR(NAME)                             \
-	static IIO_DEVICE_ATTR(NAME, 0644, primes_attr_show, \
-			       primes_attr_store,            \
-			       (intptr_t)&pattrs[PRIMES_I2C_REG_##NAME]);
-
-PRIMES_DEVICE_ATTR(C_TEST_PATTERN_CONFIG)
-PRIMES_DEVICE_ATTR(C_MIPI_TX_VC)
-PRIMES_DEVICE_ATTR(C_MIPI_TX_TYPE)
-PRIMES_DEVICE_ATTR(C_MIPI_TX_LANES)
-PRIMES_DEVICE_ATTR(C_MIPI_TX_FRAME_MODE)
-PRIMES_DEVICE_ATTR(C_MIPI_TX_HRES)
-PRIMES_DEVICE_ATTR(C_MIPI_TX_ULPS_ENTER)
-PRIMES_DEVICE_ATTR(C_MIPI_TX_ULPS_EXIT)
-PRIMES_DEVICE_ATTR(C_MIPI_TX_ULPS_CLK_ENTER)
-PRIMES_DEVICE_ATTR(C_MIPI_TX_ULPS_CLK_EXIT)
-PRIMES_DEVICE_ATTR(C_MIPI_HSA)
-PRIMES_DEVICE_ATTR(C_MIPI_HBP)
-PRIMES_DEVICE_ATTR(C_MIPI_HACT)
-PRIMES_DEVICE_ATTR(C_MIPI_HFP)
-PRIMES_DEVICE_ATTR(C_MIPI_VSA)
-PRIMES_DEVICE_ATTR(C_MIPI_VBP)
-PRIMES_DEVICE_ATTR(C_MIPI_VACT)
-PRIMES_DEVICE_ATTR(C_MIPI_VFP)
-
-static ssize_t primes_frames_lost_show(struct device *dev,
-				       struct device_attribute *attr, char *buf)
+static ssize_t frames_lost_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
 {
-	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
-	struct platform_device *pdev = container_of(
-		indio_dev->dev.parent, struct platform_device, dev);
-	struct unicam_device *unicam = platform_get_drvdata(pdev);
+	struct unicam_device *unicam = DEV2UNI(dev);
 	return sprintf(buf, "%lld\n", unicam->frames_lost);
 }
-static IIO_DEVICE_ATTR(frames_lost, 0644, primes_frames_lost_show, NULL, 0);
+
+// PRIMES_I2C_DEVICE_ATTR(amplifier, fpga_i2c_amplifier_config, 0x16, 1)
+// PRIMES_I2C_DEVICE_ATTR(tia, fpga_i2c_amplifier_config, 0x17, 1)
+
+static ssize_t amp_show(struct device *dev, struct device_attribute *attr,
+			char *buf)
+{
+	struct unicam_device *unicam = DEV2UNI(dev);
+	u8 s0 = primes_read_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x14);
+	u8 s1 = primes_read_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x15);
+	if (!s1 && !s0) {
+		return sprintf(buf, "11x\n");
+	} else if (!s1 && s0) {
+		return sprintf(buf, "2x\n");
+	} else if (s1 && !s0) {
+		return sprintf(buf, "off\n");
+	} else {
+		return sprintf(buf, "unknown\n");
+	}
+}
+
+static ssize_t amp_store(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t len)
+{
+	struct unicam_device *unicam = DEV2UNI(dev);
+	if (strcmp(buf, "11x") == 0) {
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x14, 0);
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x15, 0);
+	} else if (strcmp(buf, "2x") == 0) {
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x14, 1);
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x15, 0);
+	} else if (strcmp(buf, "off") == 0) {
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x14, 0);
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x15, 1);
+	} else {
+		dev_warn(dev, "invalid amp value '%s'", buf);
+		return -EINVAL;
+	}
+	return len;
+}
+
+static ssize_t amp_available_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "11x 2x off\n");
+}
+
+static ssize_t tia_show(struct device *dev, struct device_attribute *attr,
+			char *buf)
+{
+	struct unicam_device *unicam = DEV2UNI(dev);
+	u8 s0 = primes_read_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16);
+	u8 s1 = primes_read_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17);
+	if (!s1 && !s0) {
+		return sprintf(buf, "max\n");
+	} else if (!s1 && s0) {
+		return sprintf(buf, "mid\n");
+	} else if (s1 && !s0) {
+		return sprintf(buf, "min\n");
+	} else if (!s1 && !s0) {
+		return sprintf(buf, "off\n");
+	} else {
+		return sprintf(buf, "unknown\n");
+	}
+}
+
+static ssize_t tia_store(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t len)
+{
+	struct unicam_device *unicam = DEV2UNI(dev);
+	if (strcmp(buf, "max") == 0) {
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16, 0);
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17, 0);
+	} else if (strcmp(buf, "mid") == 0) {
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16, 1);
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17, 0);
+	} else if (strcmp(buf, "min") == 0) {
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16, 0);
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17, 1);
+	} else if (strcmp(buf, "off") == 0) {
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16, 1);
+		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17, 1);
+	} else {
+		dev_warn(dev, "invalid amp value '%s'", buf);
+		return -EINVAL;
+	}
+	return len;
+}
+
+static ssize_t tia_available_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "max mid min off\n");
+}
+
+#define PRIMES_I2C_DEVICE_ATTR(NAME, ADDR, TWO_BYTES)                 \
+	static IIO_DEVICE_ATTR(NAME, 0644, primes_attr_show,          \
+			       primes_attr_store,                     \
+			       ((intptr_t)&(struct primes_attribute){ \
+				       .name = #NAME,                 \
+				       .addr = ADDR,                  \
+				       .two_bytes = TWO_BYTES,        \
+			       }));
+
+PRIMES_I2C_DEVICE_ATTR(test_pattern_config, 0x81, 0)
+PRIMES_I2C_DEVICE_ATTR(vc, 0xa8, 0)
+PRIMES_I2C_DEVICE_ATTR(type, 0xa9, 0)
+PRIMES_I2C_DEVICE_ATTR(lanes, PRIMES_FPGA_I2C_ADDR_MIPI_LANES, 0)
+PRIMES_I2C_DEVICE_ATTR(frame_mode, 0xab, 0)
+PRIMES_I2C_DEVICE_ATTR(hact, PRIMES_FPGA_I2C_ADDR_MIPI_HACT, 1)
+PRIMES_I2C_DEVICE_ATTR(vact, PRIMES_FPGA_I2C_ADDR_MIPI_VACT, 1)
+PRIMES_I2C_DEVICE_ATTR(hsp, 0xb2, 1)
+PRIMES_I2C_DEVICE_ATTR(hbp, 0xb4, 1)
+PRIMES_I2C_DEVICE_ATTR(hfp, 0xb8, 1)
+PRIMES_I2C_DEVICE_ATTR(vsp, 0xba, 1)
+PRIMES_I2C_DEVICE_ATTR(vbp, 0xbc, 1)
+PRIMES_I2C_DEVICE_ATTR(vfp, 0xc0, 1)
+
+static IIO_DEVICE_ATTR_RO(frames_lost, 0);
+static IIO_DEVICE_ATTR_RW(amp, 0);
+static IIO_DEVICE_ATTR_RO(amp_available, 0);
+static IIO_DEVICE_ATTR_RW(tia, 0);
+static IIO_DEVICE_ATTR_RO(tia_available, 0);
 
 static struct attribute *my_attributes[] = {
-	&iio_dev_attr_C_TEST_PATTERN_CONFIG.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_TX_VC.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_TX_TYPE.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_TX_LANES.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_TX_FRAME_MODE.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_TX_HRES.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_TX_ULPS_ENTER.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_TX_ULPS_EXIT.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_TX_ULPS_CLK_ENTER.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_TX_ULPS_CLK_EXIT.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_HSA.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_HBP.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_HACT.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_HFP.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_VSA.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_VBP.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_VACT.dev_attr.attr,
-	&iio_dev_attr_C_MIPI_VFP.dev_attr.attr,
+	&iio_dev_attr_test_pattern_config.dev_attr.attr,
+	&iio_dev_attr_vc.dev_attr.attr,
+	&iio_dev_attr_type.dev_attr.attr,
+	&iio_dev_attr_lanes.dev_attr.attr,
+	&iio_dev_attr_frame_mode.dev_attr.attr,
+	&iio_dev_attr_hsp.dev_attr.attr,
+	&iio_dev_attr_hbp.dev_attr.attr,
+	&iio_dev_attr_hact.dev_attr.attr,
+	&iio_dev_attr_hfp.dev_attr.attr,
+	&iio_dev_attr_vsp.dev_attr.attr,
+	&iio_dev_attr_vbp.dev_attr.attr,
+	&iio_dev_attr_vact.dev_attr.attr,
+	&iio_dev_attr_vfp.dev_attr.attr,
 	&iio_dev_attr_frames_lost.dev_attr.attr,
+	&iio_dev_attr_amp.dev_attr.attr,
+	&iio_dev_attr_amp_available.dev_attr.attr,
+	&iio_dev_attr_tia.dev_attr.attr,
+	&iio_dev_attr_tia_available.dev_attr.attr,
 	NULL
 };
 
@@ -1079,7 +1161,7 @@ static int unicam_buffer_postenable(struct iio_dev *indio_dev)
 	struct unicam_device *unicam;
 	pdev = container_of(indio_dev->dev.parent, struct platform_device, dev);
 	unicam = platform_get_drvdata(pdev);
-	if (!unicam->sensor_client) {
+	if (!unicam->fpga_i2c_mipi_config) {
 		return -ENOSR;
 	}
 	unicam->cur_block = NULL;
@@ -1175,7 +1257,7 @@ static int unicam_probe(struct platform_device *pdev)
 	}
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
 
-	if (primes_connect_i2c_client(unicam)) {
+	if (primes_connect_i2c_clients(unicam)) {
 		ret = -EBUSY;
 		goto err_unicam_put;
 	}
@@ -1273,8 +1355,8 @@ static int unicam_probe(struct platform_device *pdev)
 	return 0;
 
 err_unicam_put:
-	if (unicam->sensor_client) {
-		i2c_unregister_device(unicam->sensor_client);
+	if (unicam->fpga_i2c_mipi_config) {
+		i2c_unregister_device(unicam->fpga_i2c_mipi_config);
 	}
 
 	platform_set_drvdata(pdev, NULL);
@@ -1305,8 +1387,12 @@ static void unicam_remove(struct platform_device *pdev)
 					  unicam->dummy_dma_vaddr,
 					  unicam->dummy_dma_addr);
 		}
-		if (unicam->sensor_client) {
-			i2c_unregister_device(unicam->sensor_client);
+		if (unicam->fpga_i2c_mipi_config) {
+			i2c_unregister_device(unicam->fpga_i2c_mipi_config);
+		}
+		if (unicam->fpga_i2c_amplifier_config) {
+			i2c_unregister_device(
+				unicam->fpga_i2c_amplifier_config);
 		}
 		if (unicam->fpga_mgr) {
 			if (!do_not_flash_fpga) {

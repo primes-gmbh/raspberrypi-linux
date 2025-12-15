@@ -1,19 +1,40 @@
 /dts-v1/;
 /plugin/;
 
+#include <dt-bindings/gpio/gpio.h>
+
 / {
-    fragment@0 {
-        target-path = "/soc";
-        __overlay__ {
-            csi@7e800000 {
-                compatible = "primes,bcm2835-unicam-primes-generic-fpga";
-                status = "okay";
-                fpga-mgr = <&fpga_mgr>;
-                sensor {
-                    busnum = <0x00>;
-                    reg = <0x41>;
-                };
-            };
-        };
+  fragment@0 {
+    target = <&spi0>;
+    __overlay__ {
+      status = "okay";
+      efinix_t120_fpga_mgr: fpga-mgr@0 {
+        compatible = "efinix,fpga-passive-spi";
+        reg = <0>;
+        spi-max-frequency = <25000000>;
+        spi-cpol;
+        spi-cpha;
+        cdone-gpios  = <&gpio 5 GPIO_ACTIVE_HIGH>;
+        creset-gpios = <&gpio 6 GPIO_ACTIVE_HIGH>;
+      };
     };
+  };
+  fragment@1 {
+    target-path = "/soc";
+    __overlay__ {
+      csi@7e800000 {
+        compatible = "primes,bcm2835-unicam-primes-generic-fpga";
+        status = "okay";
+        fpga-mgr = <&efinix_t120_fpga_mgr>;
+        fpga-i2c-mipi-config {
+          busnum = <0x00>;
+          reg = <0x41>;
+        };
+        fpga-i2c-amplifier-config {
+          busnum = <0x00>;
+          reg = <0x73>;
+        };
+      };
+    };
+  };
 };
