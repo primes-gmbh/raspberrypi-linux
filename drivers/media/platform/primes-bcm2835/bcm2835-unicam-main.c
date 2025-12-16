@@ -1004,8 +1004,6 @@ static ssize_t amp_show(struct device *dev, struct device_attribute *attr,
 		return sprintf(buf, "11x\n");
 	} else if (!s1 && s0) {
 		return sprintf(buf, "2x\n");
-	} else if (s1 && !s0) {
-		return sprintf(buf, "off\n");
 	} else {
 		return sprintf(buf, "unknown\n");
 	}
@@ -1021,9 +1019,6 @@ static ssize_t amp_store(struct device *dev, struct device_attribute *attr,
 	} else if (strcmp(buf, "2x") == 0) {
 		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x14, 1);
 		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x15, 0);
-	} else if (strcmp(buf, "off") == 0) {
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x14, 0);
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x15, 1);
 	} else {
 		dev_warn(dev, "invalid amp value '%s'", buf);
 		return -EINVAL;
@@ -1034,7 +1029,7 @@ static ssize_t amp_store(struct device *dev, struct device_attribute *attr,
 static ssize_t amp_available_show(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "11x 2x off\n");
+	return sprintf(buf, "11x 2x\n");
 }
 
 static ssize_t tia_show(struct device *dev, struct device_attribute *attr,
@@ -1049,8 +1044,6 @@ static ssize_t tia_show(struct device *dev, struct device_attribute *attr,
 		return sprintf(buf, "mid\n");
 	} else if (s1 && !s0) {
 		return sprintf(buf, "min\n");
-	} else if (!s1 && !s0) {
-		return sprintf(buf, "off\n");
 	} else {
 		return sprintf(buf, "unknown\n");
 	}
@@ -1069,9 +1062,6 @@ static ssize_t tia_store(struct device *dev, struct device_attribute *attr,
 	} else if (strcmp(buf, "min") == 0) {
 		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16, 0);
 		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17, 1);
-	} else if (strcmp(buf, "off") == 0) {
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16, 1);
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17, 1);
 	} else {
 		dev_warn(dev, "invalid amp value '%s'", buf);
 		return -EINVAL;
@@ -1082,7 +1072,7 @@ static ssize_t tia_store(struct device *dev, struct device_attribute *attr,
 static ssize_t tia_available_show(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "max mid min off\n");
+	return sprintf(buf, "max mid min\n");
 }
 
 #define PRIMES_I2C_DEVICE_ATTR(NAME, ADDR, TWO_BYTES)                 \
