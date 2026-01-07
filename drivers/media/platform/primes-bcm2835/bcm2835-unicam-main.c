@@ -989,7 +989,9 @@ static ssize_t dac_show(struct device *dev, struct device_attribute *attr,
 	} else {
 		return -EINVAL;
 	}
-
+	if (val < 0) {
+		return val;
+	}
 	return sprintf(buf, "%u\n", val);
 }
 

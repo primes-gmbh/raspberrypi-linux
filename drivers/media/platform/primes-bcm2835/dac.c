@@ -23,7 +23,7 @@ static u16 primes_dac_read(struct primes_dac *dac, u8 addr)
 	if (val < 0) {
 		return val;
 	}
-	val2 = (i2c_smbus_read_byte_data(dac->client,
+	val2 = i2c_smbus_read_byte_data(dac->client,
 					 dac->base + PRIMES_DAC_OFF_RX + 1);
 	if (val2 < 0) {
 		return val2;
