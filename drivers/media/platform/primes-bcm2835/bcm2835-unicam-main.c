@@ -41,6 +41,8 @@
 // #include "bcm2835-iio-dma-buffer.h"
 #include "vc4-regs-unicam.h"
 
+#include "dac.h"
+
 #define UNICAM_MODULE_NAME "unicam"
 #define UNICAM_VERSION "0.1.0"
 
@@ -93,6 +95,9 @@ struct unicam_device {
 
 	bool frame_started;
 
+	struct mutex mx_streaming;
+	bool streaming;
+
 	size_t dummy_dma_size;
 	dma_addr_t dummy_dma_addr;
 	void *dummy_dma_vaddr;
@@ -111,6 +116,8 @@ struct unicam_device {
 
 	struct i2c_client *fpga_i2c_mipi_config;
 	struct i2c_client *fpga_i2c_amplifier_config;
+	struct primes_dac dac0;
+	struct primes_dac dac1;
 
 	struct fpga_manager *fpga_mgr;
 };
@@ -238,6 +245,7 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 
 	ibwp = reg_read(unicam, UNICAM_IBWP);
 	sta = reg_read(unicam, UNICAM_STA);
+	ista = reg_read(unicam, UNICAM_ISTA);
 
 	if (sta & UNICAM_SBE) {
 		dev_err(&unicam->pdev->dev, "short packet bit error");
@@ -286,11 +294,10 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 
 	/* Write value back to clear the interrupts */
 	reg_write(unicam, UNICAM_STA, sta);
-	ista = reg_read(unicam, UNICAM_ISTA);
 	/* Write value back to clear the interrupts */
 	reg_write(unicam, UNICAM_ISTA, ista);
-	ibsa0 = reg_read(dev, UNICAM_IBSA0);
-	ibea0 = reg_read(dev, UNICAM_IBEA0);
+	ibsa0 = reg_read(unicam, UNICAM_IBSA0);
+	ibea0 = reg_read(unicam, UNICAM_IBEA0);
 
 	if (!(sta & (UNICAM_IS | UNICAM_PI0))) {
 		return IRQ_HANDLED;
@@ -322,9 +329,9 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	}
 	if (fs) {
 		if (unicam->dummy_scheduled) {
-			dev_warn(&unicam->pdev->dev,
-				 "frame lost - reason: %s\n",
-				 unicam->frame_lost_reason);
+			// dev_warn(&unicam->pdev->dev,
+			// 	 "frame lost - reason: %s\n",
+			// 	 unicam->frame_lost_reason);
 		}
 		if (!unicam->next_block ||
 		    unicam->cur_block == unicam->next_block) {
@@ -751,7 +758,7 @@ static int primes_connect_i2c_clients(struct unicam_device *unicam)
 static int unicam_start_streaming(struct unicam_device *unicam)
 {
 	int ret;
-
+	mutex_lock(&unicam->mx_streaming);
 	unicam->sequence = 0;
 	ret = unicam_runtime_get(unicam);
 	if (ret < 0) {
@@ -777,12 +784,16 @@ static int unicam_start_streaming(struct unicam_device *unicam)
 
 	unicam->frame_started = false;
 	unicam_start_rx(unicam);
+	unicam->streaming = true;
 
-	return 0;
+	ret = 0;
+	goto end;
 
 error_pipeline:
 	pm_runtime_put_sync(&unicam->pdev->dev);
 err_streaming:
+end:
+	mutex_unlock(&unicam->mx_streaming);
 	return ret;
 }
 
@@ -810,9 +821,14 @@ static void unicam_return_buffers(struct unicam_device *unicam)
 
 static void unicam_stop_streaming(struct unicam_device *unicam)
 {
-	pm_runtime_put_sync(&unicam->pdev->dev);
-	unicam_disable(unicam);
-	unicam_return_buffers(unicam);
+	mutex_lock(&unicam->mx_streaming);
+	if (unicam->streaming) {
+		pm_runtime_put_sync(&unicam->pdev->dev);
+		unicam_disable(unicam);
+		unicam_return_buffers(unicam);
+		unicam->streaming = false;
+	}
+	mutex_unlock(&unicam->mx_streaming);
 }
 
 static void unicam_iio_buffer_release(struct iio_buffer *buf)
@@ -848,12 +864,21 @@ static const struct iio_buffer_access_funcs unicam_iio_buffer_access_ops = {
 static int unicam_dma_buffer_op_submit(struct iio_dma_buffer_queue *queue,
 				       struct iio_dma_buffer_block *block)
 {
-	struct platform_device *pdev =
-		container_of(queue->dev, struct platform_device, dev);
-	struct unicam_device *unicam = platform_get_drvdata(pdev);
+	struct iio_dev *indio_dev;
+	struct unicam_device *unicam;
+
+	indio_dev = dev_get_drvdata(queue->dev);
+	if (!indio_dev)
+		return -ENODEV;
+
+	unicam = iio_priv(indio_dev);
+	if (!unicam)
+		return -ENODEV;
+
 	spin_lock(&unicam->list_lock);
 	list_add_tail(&block->head, &unicam->block_list);
 	spin_unlock(&unicam->list_lock);
+
 	return 0;
 }
 
@@ -888,17 +913,17 @@ struct primes_attribute {
 	bool two_bytes;
 };
 
-static int primes_write_i2c_u8(struct i2c_client *client, u8 addr, u16 val)
+static int primes_i2c_write_u8(struct i2c_client *client, u8 addr, u16 val)
 {
 	return i2c_smbus_write_byte_data(client, addr, val & 0xff);
 }
 
-static int primes_read_i2c_u8(struct i2c_client *client, u8 addr)
+static int primes_i2c_read_u8(struct i2c_client *client, u8 addr)
 {
 	return i2c_smbus_read_byte_data(client, addr);
 }
 
-static int primes_write_i2c_u16(struct i2c_client *client, u8 addr, u16 val)
+static int primes_i2c_write_u16(struct i2c_client *client, u8 addr, u16 val)
 {
 	int ret;
 	ret = i2c_smbus_write_byte_data(client, addr, val >> 8);
@@ -906,14 +931,12 @@ static int primes_write_i2c_u16(struct i2c_client *client, u8 addr, u16 val)
 		return ret;
 	}
 	ret = i2c_smbus_write_byte_data(client, addr + 1, val);
-	if (ret < 0) {
-	}
 	return ret;
 }
 
-static int primes_read_i2c_u16(struct i2c_client *client, u8 addr)
+static int primes_i2c_read_u16(struct i2c_client *client, u8 addr)
 {
-	u16 val, val2;
+	int val, val2;
 	val = i2c_smbus_read_byte_data(client, addr);
 	if (val < 0) {
 		return val;
@@ -923,12 +946,108 @@ static int primes_read_i2c_u16(struct i2c_client *client, u8 addr)
 	if (val2 < 0) {
 		return val2;
 	}
-	return val | val2;
+	return (val & 0xff00) | (val2 & 0xff);
 }
 
-#define DEV2UNI(DEV)                                                       \
-	platform_get_drvdata(container_of(dev_to_iio_dev(DEV)->dev.parent, \
-					  struct platform_device, DEV))
+static inline struct unicam_device *dev_to_unicam(struct device *dev)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+
+	if (!indio_dev)
+		return NULL;
+
+	return iio_priv(indio_dev);
+}
+
+static ssize_t dac_show(struct device *dev, struct device_attribute *attr,
+			char *buf)
+{
+	struct iio_dev_attr *iioattr =
+		container_of(attr, struct iio_dev_attr, dev_attr);
+	struct unicam_device *unicam = dev_to_unicam(dev);
+	u16 val = (u16)-1;
+
+	if (!unicam)
+		return -ENODEV;
+
+	if (strcmp(attr->attr.name, "dac0:0") == 0) {
+		val = primes_dac_read_data(&unicam->dac0, 0);
+	} else if (strcmp(attr->attr.name, "dac0:1") == 0) {
+		val = primes_dac_read_data(&unicam->dac0, 1);
+	} else if (strcmp(attr->attr.name, "dac0:2") == 0) {
+		val = primes_dac_read_data(&unicam->dac0, 2);
+	} else if (strcmp(attr->attr.name, "dac0:3") == 0) {
+		val = primes_dac_read_data(&unicam->dac0, 3);
+	} else if (strcmp(attr->attr.name, "dac1:0") == 0) {
+		val = primes_dac_read_data(&unicam->dac1, 0);
+	} else if (strcmp(attr->attr.name, "dac1:1") == 0) {
+		val = primes_dac_read_data(&unicam->dac1, 1);
+	} else if (strcmp(attr->attr.name, "dac1:2") == 0) {
+		val = primes_dac_read_data(&unicam->dac1, 2);
+	} else if (strcmp(attr->attr.name, "dac1:3") == 0) {
+		val = primes_dac_read_data(&unicam->dac1, 3);
+	} else {
+		return -EINVAL;
+	}
+
+	return sprintf(buf, "%u\n", val);
+}
+
+static ssize_t dac_store(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t len)
+{
+	struct iio_dev_attr *iioattr =
+		container_of(attr, struct iio_dev_attr, dev_attr);
+	struct unicam_device *unicam = dev_to_unicam(dev);
+	u16 val;
+
+	if (!unicam)
+		return -ENODEV;
+
+	if (kstrtou16(buf, 10, &val))
+		return -EINVAL;
+
+	val &= 0x0fff;
+
+	if (strcmp(attr->attr.name, "dac0:0") == 0) {
+		primes_dac_write_data(&unicam->dac0, 0, val);
+	} else if (strcmp(attr->attr.name, "dac0:1") == 0) {
+		primes_dac_write_data(&unicam->dac0, 1, val);
+	} else if (strcmp(attr->attr.name, "dac0:2") == 0) {
+		primes_dac_write_data(&unicam->dac0, 2, val);
+	} else if (strcmp(attr->attr.name, "dac0:3") == 0) {
+		primes_dac_write_data(&unicam->dac0, 3, val);
+	} else if (strcmp(attr->attr.name, "dac1:0") == 0) {
+		primes_dac_write_data(&unicam->dac1, 0, val);
+	} else if (strcmp(attr->attr.name, "dac1:1") == 0) { /* fixed */
+		primes_dac_write_data(&unicam->dac1, 1, val);
+	} else if (strcmp(attr->attr.name, "dac1:2") == 0) {
+		primes_dac_write_data(&unicam->dac1, 2, val);
+	} else if (strcmp(attr->attr.name, "dac1:3") == 0) {
+		primes_dac_write_data(&unicam->dac1, 3, val);
+	} else {
+		return -EINVAL;
+	}
+
+	return len;
+}
+
+static ssize_t dac0_common_config_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct iio_dev_attr *iioattr =
+		container_of(attr, struct iio_dev_attr, dev_attr);
+	struct primes_attribute *pattr =
+		(struct primes_attribute *)iioattr->address;
+	struct unicam_device *unicam = dev_to_unicam(dev);
+	int ret;
+
+	if (!unicam)
+		return -ENODEV;
+
+	ret = primes_dac_read_common_config(&unicam->dac0);
+	return sprintf(buf, "%d\n", ret);
+}
 
 static ssize_t primes_attr_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
@@ -938,20 +1057,27 @@ static ssize_t primes_attr_show(struct device *dev,
 		container_of(attr, struct iio_dev_attr, dev_attr);
 	struct primes_attribute *pattr =
 		(struct primes_attribute *)iioattr->address;
-	struct unicam_device *unicam = DEV2UNI(dev);
-	struct i2c_client *client = unicam->fpga_i2c_mipi_config;
-	if (!client) {
+	struct unicam_device *unicam = dev_to_unicam(dev);
+	struct i2c_client *client;
+
+	if (!unicam)
+		return -ENODEV;
+
+	client = unicam->fpga_i2c_mipi_config;
+	if (!client)
 		return -ENXIO;
-	}
+
 	if (pattr->two_bytes) {
-		ret = primes_read_i2c_u16(client, pattr->addr);
+		ret = primes_i2c_read_u16(client, pattr->addr);
 	} else {
-		ret = primes_read_i2c_u8(client, pattr->addr);
+		ret = primes_i2c_read_u8(client, pattr->addr);
 	}
+
 	if (ret < 0) {
 		dev_err(dev, "I2C read failed: %d\n", ret);
 		return ret;
 	}
+
 	return sprintf(buf, "%d\n", ret);
 }
 
@@ -964,65 +1090,83 @@ static ssize_t primes_attr_store(struct device *dev,
 		container_of(attr, struct iio_dev_attr, dev_attr);
 	struct primes_attribute *pattr =
 		(struct primes_attribute *)iioattr->address;
-	struct unicam_device *unicam = DEV2UNI(dev);
-	struct i2c_client *client = unicam->fpga_i2c_mipi_config;
-	if (!client) {
-		return -ENXIO;
-	}
+	struct unicam_device *unicam = dev_to_unicam(dev);
+	struct i2c_client *client;
 	u16 val;
+
+	if (!unicam)
+		return -ENODEV;
+
+	client = unicam->fpga_i2c_mipi_config;
+	if (!client)
+		return -ENXIO;
+
 	if (kstrtou16(buf, 10, &val))
 		return -EINVAL;
-	if (pattr->two_bytes) {
-		ret = primes_write_i2c_u16(client, pattr->addr, val);
-	} else {
-		ret = primes_write_i2c_u8(client, pattr->addr, val);
-	}
+
+	if (pattr->two_bytes)
+		ret = primes_i2c_write_u16(client, pattr->addr, val);
+	else
+		ret = primes_i2c_write_u8(client, pattr->addr, (u8)val);
+
 	if (ret < 0) {
 		dev_err(dev, "I2C write failed: %d\n", ret);
 		return ret;
 	}
+
 	return len;
 }
 
 static ssize_t frames_lost_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
-	struct unicam_device *unicam = DEV2UNI(dev);
+	struct unicam_device *unicam = dev_to_unicam(dev);
+
+	if (!unicam)
+		return -ENODEV;
+
 	return sprintf(buf, "%lld\n", unicam->frames_lost);
 }
-
-// PRIMES_I2C_DEVICE_ATTR(amplifier, fpga_i2c_amplifier_config, 0x16, 1)
-// PRIMES_I2C_DEVICE_ATTR(tia, fpga_i2c_amplifier_config, 0x17, 1)
 
 static ssize_t amp_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
-	struct unicam_device *unicam = DEV2UNI(dev);
-	u8 s0 = primes_read_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x14);
-	u8 s1 = primes_read_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x15);
-	if (!s1 && !s0) {
+	struct unicam_device *unicam = dev_to_unicam(dev);
+	u8 s0, s1;
+
+	if (!unicam || !unicam->fpga_i2c_amplifier_config)
+		return -ENXIO;
+
+	s0 = primes_i2c_read_u8(unicam->fpga_i2c_amplifier_config, 0x14);
+	s1 = primes_i2c_read_u8(unicam->fpga_i2c_amplifier_config, 0x15);
+
+	if (!s1 && !s0)
 		return sprintf(buf, "11x\n");
-	} else if (!s1 && s0) {
+	else if (!s1 && s0)
 		return sprintf(buf, "2x\n");
-	} else {
-		return sprintf(buf, "unknown\n");
-	}
+
+	return sprintf(buf, "unknown\n");
 }
 
 static ssize_t amp_store(struct device *dev, struct device_attribute *attr,
 			 const char *buf, size_t len)
 {
-	struct unicam_device *unicam = DEV2UNI(dev);
-	if (strcmp(buf, "11x") == 0) {
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x14, 0);
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x15, 0);
-	} else if (strcmp(buf, "2x") == 0) {
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x14, 1);
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x15, 0);
+	struct unicam_device *unicam = dev_to_unicam(dev);
+
+	if (!unicam || !unicam->fpga_i2c_amplifier_config)
+		return -ENXIO;
+
+	if (sysfs_streq(buf, "11x")) {
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x14, 0);
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x15, 0);
+	} else if (sysfs_streq(buf, "2x")) {
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x14, 1);
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x15, 0);
 	} else {
-		dev_warn(dev, "invalid amp value '%s'", buf);
+		dev_warn(dev, "invalid amp value '%s'\n", buf);
 		return -EINVAL;
 	}
+
 	return len;
 }
 
@@ -1035,37 +1179,47 @@ static ssize_t amp_available_show(struct device *dev,
 static ssize_t tia_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
-	struct unicam_device *unicam = DEV2UNI(dev);
-	u8 s0 = primes_read_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16);
-	u8 s1 = primes_read_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17);
-	if (!s1 && !s0) {
+	struct unicam_device *unicam = dev_to_unicam(dev);
+	u8 s0, s1;
+
+	if (!unicam || !unicam->fpga_i2c_amplifier_config)
+		return -ENXIO;
+
+	s0 = primes_i2c_read_u8(unicam->fpga_i2c_amplifier_config, 0x16);
+	s1 = primes_i2c_read_u8(unicam->fpga_i2c_amplifier_config, 0x17);
+
+	if (!s1 && !s0)
 		return sprintf(buf, "max\n");
-	} else if (!s1 && s0) {
+	else if (!s1 && s0)
 		return sprintf(buf, "mid\n");
-	} else if (s1 && !s0) {
+	else if (s1 && !s0)
 		return sprintf(buf, "min\n");
-	} else {
-		return sprintf(buf, "unknown\n");
-	}
+
+	return sprintf(buf, "unknown\n");
 }
 
 static ssize_t tia_store(struct device *dev, struct device_attribute *attr,
 			 const char *buf, size_t len)
 {
-	struct unicam_device *unicam = DEV2UNI(dev);
-	if (strcmp(buf, "max") == 0) {
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16, 0);
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17, 0);
-	} else if (strcmp(buf, "mid") == 0) {
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16, 1);
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17, 0);
-	} else if (strcmp(buf, "min") == 0) {
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x16, 0);
-		primes_write_i2c_u8(unicam->fpga_i2c_amplifier_config, 0x17, 1);
+	struct unicam_device *unicam = dev_to_unicam(dev);
+
+	if (!unicam || !unicam->fpga_i2c_amplifier_config)
+		return -ENXIO;
+
+	if (sysfs_streq(buf, "max")) {
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x16, 0);
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x17, 0);
+	} else if (sysfs_streq(buf, "mid")) {
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x16, 1);
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x17, 0);
+	} else if (sysfs_streq(buf, "min")) {
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x16, 0);
+		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x17, 1);
 	} else {
-		dev_warn(dev, "invalid amp value '%s'", buf);
+		dev_warn(dev, "invalid tia value '%s'\n", buf);
 		return -EINVAL;
 	}
+
 	return len;
 }
 
@@ -1104,6 +1258,22 @@ static IIO_DEVICE_ATTR_RO(amp_available, 0);
 static IIO_DEVICE_ATTR_RW(tia, 0);
 static IIO_DEVICE_ATTR_RO(tia_available, 0);
 
+// clang-format off
+struct iio_dev_attr iio_dev_attr_dac0[] = {
+	IIO_ATTR(dac0:0, 0644, dac_show, dac_store, 0),
+	IIO_ATTR(dac0:1, 0644, dac_show, dac_store, 0),
+	IIO_ATTR(dac0:2, 0644, dac_show, dac_store, 0),
+	IIO_ATTR(dac0:3, 0644, dac_show, dac_store, 0)
+};
+struct iio_dev_attr iio_dev_attr_dac1[] = {
+	IIO_ATTR(dac1:0, 0644, dac_show, dac_store, 0),
+	IIO_ATTR(dac1:1, 0644, dac_show, dac_store, 0),
+	IIO_ATTR(dac1:2, 0644, dac_show, dac_store, 0),
+	IIO_ATTR(dac1:3, 0644, dac_show, dac_store, 0)
+};
+// clang-format on
+static IIO_DEVICE_ATTR_RO(dac0_common_config, 0);
+
 static struct attribute *my_attributes[] = {
 	&iio_dev_attr_test_pattern_config.dev_attr.attr,
 	&iio_dev_attr_vc.dev_attr.attr,
@@ -1123,6 +1293,15 @@ static struct attribute *my_attributes[] = {
 	&iio_dev_attr_amp_available.dev_attr.attr,
 	&iio_dev_attr_tia.dev_attr.attr,
 	&iio_dev_attr_tia_available.dev_attr.attr,
+	&iio_dev_attr_dac0[0].dev_attr.attr,
+	&iio_dev_attr_dac0[1].dev_attr.attr,
+	&iio_dev_attr_dac0[2].dev_attr.attr,
+	&iio_dev_attr_dac0[3].dev_attr.attr,
+	&iio_dev_attr_dac1[0].dev_attr.attr,
+	&iio_dev_attr_dac1[1].dev_attr.attr,
+	&iio_dev_attr_dac1[2].dev_attr.attr,
+	&iio_dev_attr_dac1[3].dev_attr.attr,
+	&iio_dev_attr_dac0_common_config.dev_attr.attr,
 	NULL
 };
 
@@ -1134,49 +1313,58 @@ static const struct iio_info unicam_iio_info = {
 	.attrs = &my_attribute_group,
 };
 
-static DEFINE_MUTEX(primes_iio_dev_mx);
-static bool primes_iio_device_in_use = false;
-
 static int unicam_buffer_postenable(struct iio_dev *indio_dev)
 {
-	mutex_lock(&primes_iio_dev_mx);
-	if (primes_iio_device_in_use) {
-		mutex_unlock(&primes_iio_dev_mx);
-		return -EBUSY;
-	}
-	primes_iio_device_in_use = true;
-	mutex_unlock(&primes_iio_dev_mx);
-	int res;
-	struct platform_device *pdev;
-	struct unicam_device *unicam;
-	pdev = container_of(indio_dev->dev.parent, struct platform_device, dev);
-	unicam = platform_get_drvdata(pdev);
+	dev_info(&indio_dev->dev, "unicam_buffer_postenable\n");
+	struct unicam_device *unicam = iio_priv(indio_dev);
+	int ret;
+
+	if (!unicam)
+		return -ENODEV;
+
+	if (!try_module_get(THIS_MODULE))
+		return -ENODEV;
+
 	if (!unicam->fpga_i2c_mipi_config) {
-		return -ENOSR;
+		ret = -ENOSR;
+		goto err_put_module;
 	}
+
 	unicam->cur_block = NULL;
 	unicam->next_block = NULL;
-	res = unicam_start_streaming(unicam);
-	return res;
+
+	ret = unicam_start_streaming(unicam);
+	if (ret)
+		goto err_put_module;
+
+	return 0;
+
+err_put_module:
+	module_put(THIS_MODULE);
+	return ret;
 }
 
 static int unicam_buffer_predisable(struct iio_dev *indio_dev)
 {
-	struct platform_device *pdev = container_of(
-		indio_dev->dev.parent, struct platform_device, dev);
-	struct unicam_device *unicam = platform_get_drvdata(pdev);
+	dev_info(&indio_dev->dev, "unicam_buffer_predisable\n");
+	struct unicam_device *unicam = iio_priv(indio_dev);
+
+	if (!unicam)
+		goto out_put;
+
 	unicam_log_status(unicam);
-	printk("predisable\n");
+
 	unicam_stop_streaming(unicam);
 
-	mutex_lock(&primes_iio_dev_mx);
-	primes_iio_device_in_use = false;
-	mutex_unlock(&primes_iio_dev_mx);
+out_put:
+	/* Must match try_module_get() in postenable */
+	module_put(THIS_MODULE);
 	return 0;
 }
 
 static int unicam_buffer_postdisable(struct iio_dev *indio_dev)
 {
+	dev_info(&indio_dev->dev, "unicam_buffer_postdisable\n");
 	return 0;
 }
 
@@ -1191,259 +1379,337 @@ module_param(do_not_flash_fpga, int, 0644);
 
 static int unicam_probe(struct platform_device *pdev)
 {
-	struct device *dev;
+	struct device *dev = &pdev->dev;
+	struct iio_dev *indio_dev;
 	struct unicam_device *unicam;
-	int ret;
+	int ret, irq;
 
-	dev = &pdev->dev;
 	dev_info(dev, "unicam_probe\n");
 
-	unicam = kzalloc(sizeof(*unicam), GFP_KERNEL);
-	if (!unicam) {
+	/* Allocate iio_dev with private data (unicam) attached */
+	indio_dev = devm_iio_device_alloc(dev, sizeof(*unicam));
+	if (!indio_dev)
 		return -ENOMEM;
-	}
+
+	unicam = iio_priv(indio_dev);
+	memset(unicam, 0, sizeof(*unicam));
+
+	mutex_init(&unicam->mx_streaming);
 	unicam->frame_lost_reason = "unknown";
 
+	unicam->pdev = pdev;
+	unicam->indio_dev = indio_dev;
+
+	/* Make indio_dev retrievable in remove() */
+	platform_set_drvdata(pdev, indio_dev);
+
+	/* DMA setup */
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret)
+		dev_warn(dev, "Unable to set DMA mask (%d)\n", ret);
+
+	dev->coherent_dma_mask = DMA_BIT_MASK(32);
+	dev->dma_parms = devm_kzalloc(dev, sizeof(*dev->dma_parms), GFP_KERNEL);
+	if (!dev->dma_parms) {
+		ret = -ENOMEM;
+		goto err_clear_drvdata;
+	}
+	dma_set_max_seg_size(dev, UINT_MAX);
+
+	/* Optional FPGA programming */
 	if (!do_not_flash_fpga) {
 		struct device_node *mgr_np;
 		struct fpga_manager *mgr;
+		struct fpga_image_info info = { 0 };
+
 		mgr_np = of_parse_phandle(dev->of_node, "fpga-mgr", 0);
 		if (!mgr_np) {
 			dev_warn(dev, "no fpga-mgr property found\n");
-			return -ENODEV;
+			ret = -ENODEV;
+			goto err_clear_drvdata;
 		}
 
 		mgr = of_fpga_mgr_get(mgr_np);
 		of_node_put(mgr_np);
 		if (IS_ERR(mgr)) {
 			dev_err(dev, "failed to get FPGA manager: %pe\n", mgr);
-			return -EPROBE_DEFER;
+			ret = -EPROBE_DEFER;
+			goto err_clear_drvdata;
 		}
-		struct fpga_image_info info = { 0 };
+
 		info.dev = dev;
 		info.firmware_name = "efinix-t120.hex.bin";
+
 		ret = fpga_mgr_load(mgr, &info);
 		if (ret) {
+			dev_err(dev, "failed to program FPGA (%d)\n", ret);
 			fpga_mgr_put(mgr);
-			dev_err(dev, "failed to program FPGA");
-			return ret;
+			goto err_clear_drvdata;
 		}
+
 		unicam->fpga_mgr = mgr;
 	}
 
-	unicam->pdev = pdev;
-	platform_set_drvdata(pdev, unicam);
-
-	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	/* I2C clients */
+	ret = primes_connect_i2c_clients(unicam);
 	if (ret) {
-		printk("Unable to set DMA mask\n");
-	}
-	pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
-	pdev->dev.dma_parms = devm_kzalloc(
-		&pdev->dev, sizeof(*pdev->dev.dma_parms), GFP_KERNEL);
-	if (!pdev->dev.dma_parms) {
-		ret = -ENOMEM;
-		goto err_unicam_put;
-	}
-	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
-
-	if (primes_connect_i2c_clients(unicam)) {
 		ret = -EBUSY;
-		goto err_unicam_put;
+		goto err_put_fpga_mgr;
 	}
 
-	/*
-         * Adopt the current setting of the module parameter, and check if
-         * device tree requests it.
-         */
+	/* DAC setup */
+	unicam->dac0.base = PRIMES_DAC0_BASE;
+	unicam->dac0.client = unicam->fpga_i2c_amplifier_config;
+	primes_dac_sdo_en(&unicam->dac0);
+	primes_dac_write_common_config(&unicam->dac0, 585);
 
+	unicam->dac1.base = PRIMES_DAC1_BASE;
+	unicam->dac1.client = unicam->fpga_i2c_amplifier_config;
+	primes_dac_sdo_en(&unicam->dac1);
+	primes_dac_write_common_config(&unicam->dac1, 585);
+
+	/* MMIO */
 	unicam->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(unicam->base)) {
 		dev_err(dev, "Failed to get main io block\n");
 		ret = PTR_ERR(unicam->base);
-		goto err_unicam_put;
+		goto err_unreg_i2c;
 	}
 
 	unicam->clk_gate_base = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(unicam->clk_gate_base)) {
 		dev_err(dev, "Failed to get 2nd io block\n");
 		ret = PTR_ERR(unicam->clk_gate_base);
-		goto err_unicam_put;
+		goto err_unreg_i2c;
 	}
 
-	unicam->clock = devm_clk_get(&pdev->dev, "lp");
+	/* Clocks */
+	unicam->clock = devm_clk_get(dev, "lp");
 	if (IS_ERR(unicam->clock)) {
 		dev_err(dev, "Failed to get lp clock\n");
 		ret = PTR_ERR(unicam->clock);
-		goto err_unicam_put;
+		goto err_unreg_i2c;
 	}
 
-	unicam->vpu_clock = devm_clk_get(&pdev->dev, "vpu");
+	unicam->vpu_clock = devm_clk_get(dev, "vpu");
 	if (IS_ERR(unicam->vpu_clock)) {
 		dev_err(dev, "Failed to get vpu clock\n");
 		ret = PTR_ERR(unicam->vpu_clock);
-		goto err_unicam_put;
+		goto err_unreg_i2c;
 	}
 
-	ret = platform_get_irq(pdev, 0);
-	if (ret <= 0) {
+	/* IRQ */
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0) {
 		dev_err(dev, "No IRQ resource\n");
-		ret = -EINVAL;
-		goto err_unicam_put;
+		ret = irq;
+		goto err_unreg_i2c;
 	}
 
-	ret = devm_request_irq(&pdev->dev, ret, unicam_isr, 0,
-			       "unicam_capture0", unicam);
+	ret = devm_request_irq(dev, irq, unicam_isr, 0, "unicam_capture0",
+			       unicam);
 	if (ret) {
-		dev_err(dev, "Unable to request interrupt\n");
-		ret = -EINVAL;
-		goto err_unicam_put;
+		dev_err(dev, "Unable to request interrupt (%d)\n", ret);
+		goto err_unreg_i2c;
 	}
 
-	/* Enable the block power domain */
-	pm_runtime_enable(&pdev->dev);
+	/* Runtime PM */
+	pm_runtime_enable(dev);
 
-	unicam->dummy_dma_vaddr = dma_alloc_coherent(&pdev->dev, DUMMY_BUF_SIZE,
-						     &unicam->dummy_dma_addr,
-						     GFP_KERNEL);
-	unicam->dummy_dma_size = DUMMY_BUF_SIZE; // This data is not needed
+	/* Use devm-managed coherent allocation if possible */
+	unicam->dummy_dma_vaddr = dmam_alloc_coherent(
+		dev, DUMMY_BUF_SIZE, &unicam->dummy_dma_addr, GFP_KERNEL);
+	unicam->dummy_dma_size = DUMMY_BUF_SIZE;
 	if (!unicam->dummy_dma_vaddr) {
-		dev_err(dev, "Unable to allocated dma buffer\n");
-		ret = -EINVAL;
-		goto err_unicam_put;
+		dev_err(dev, "Unable to allocate dummy dma buffer\n");
+		ret = -ENOMEM;
+		goto err_pm_disable;
 	}
 	memset(unicam->dummy_dma_vaddr, 0xab, unicam->dummy_dma_size);
 
 	INIT_LIST_HEAD(&unicam->block_list);
 	spin_lock_init(&unicam->list_lock);
 
-	unicam->indio_dev = devm_iio_device_alloc(&unicam->pdev->dev, 0);
-	unicam->indio_dev->priv = unicam;
-	unicam->indio_dev->setup_ops = &unicam_buffer_setup_ops;
-	unicam->indio_dev->name = "primes-iio-dev";
-	unicam->indio_dev->info = &unicam_iio_info;
-	unicam->indio_dev->modes = INDIO_BUFFER_HARDWARE | INDIO_DIRECT_MODE;
-	unicam->indio_dev->num_channels = ARRAY_SIZE(unicam_iio_channels);
-	unicam->indio_dev->channels = unicam_iio_channels;
+	/* IIO device setup */
+	indio_dev->setup_ops = &unicam_buffer_setup_ops;
+	indio_dev->name = "primes-iio-dev";
+	indio_dev->info = &unicam_iio_info;
+	indio_dev->modes = INDIO_BUFFER_HARDWARE | INDIO_DIRECT_MODE;
+	indio_dev->num_channels = ARRAY_SIZE(unicam_iio_channels);
+	indio_dev->channels = unicam_iio_channels;
 
 	for (int i = 0; i < ARRAY_SIZE(unicam->queue); i++) {
-		iio_dma_buffer_init(&unicam->queue[i], &unicam->pdev->dev,
+		iio_dma_buffer_init(&unicam->queue[i], dev,
 				    &unicam_iio_dma_buffer_ops);
 		unicam->queue[i].buffer.access = &unicam_iio_buffer_access_ops;
 		unicam->queue[i].buffer.direction = IIO_BUFFER_DIRECTION_IN;
-		iio_device_attach_buffer(unicam->indio_dev,
-					 &unicam->queue[i].buffer);
+
+		iio_device_attach_buffer(indio_dev, &unicam->queue[i].buffer);
 	}
 
-	ret = iio_device_register(unicam->indio_dev);
-
+	ret = devm_iio_device_register(dev, indio_dev);
 	if (ret) {
-		dev_err(dev, "Failed to register iio device: %u\n", ret);
-		return 1;
+		dev_err(dev, "Failed to register iio device: %d\n", ret);
+		goto err_pm_disable;
 	}
 
 	return 0;
 
-err_unicam_put:
-	if (unicam->fpga_i2c_mipi_config) {
+err_pm_disable:
+	pm_runtime_disable(dev);
+
+err_unreg_i2c:
+	if (unicam->fpga_i2c_mipi_config)
 		i2c_unregister_device(unicam->fpga_i2c_mipi_config);
+	if (unicam->fpga_i2c_amplifier_config)
+		i2c_unregister_device(unicam->fpga_i2c_amplifier_config);
+
+err_put_fpga_mgr:
+	if (unicam->fpga_mgr) {
+		if (!do_not_flash_fpga && unicam->fpga_mgr->mops &&
+		    unicam->fpga_mgr->mops->fpga_remove)
+			unicam->fpga_mgr->mops->fpga_remove(unicam->fpga_mgr);
+
+		fpga_mgr_put(unicam->fpga_mgr);
+		unicam->fpga_mgr = NULL;
 	}
 
+err_clear_drvdata:
 	platform_set_drvdata(pdev, NULL);
-	kfree(unicam);
-
 	return ret;
-}
-
-static void unicam_remove(struct platform_device *pdev)
-{
-	dev_info(&pdev->dev, "unicam_remove\n");
-	struct unicam_device *unicam = platform_get_drvdata(pdev);
-	if (unicam) {
-		pm_runtime_disable(&pdev->dev);
-		unicam_disable(unicam);
-		usleep_range(1000, 2000);
-		if (unicam->indio_dev) {
-			for (int i = 0; i < ARRAY_SIZE(unicam->queue); i++) {
-				iio_dma_buffer_exit(&unicam->queue[i]);
-			}
-			for (int i = 0; i < ARRAY_SIZE(unicam->queue); i++) {
-				iio_dma_buffer_release(&unicam->queue[i]);
-			}
-			iio_device_unregister(unicam->indio_dev);
-		}
-		if (unicam->dummy_dma_vaddr) {
-			dma_free_coherent(&pdev->dev, unicam->dummy_dma_size,
-					  unicam->dummy_dma_vaddr,
-					  unicam->dummy_dma_addr);
-		}
-		if (unicam->fpga_i2c_mipi_config) {
-			i2c_unregister_device(unicam->fpga_i2c_mipi_config);
-		}
-		if (unicam->fpga_i2c_amplifier_config) {
-			i2c_unregister_device(
-				unicam->fpga_i2c_amplifier_config);
-		}
-		if (unicam->fpga_mgr) {
-			if (!do_not_flash_fpga) {
-				if (unicam->fpga_mgr->mops->fpga_remove) {
-					unicam->fpga_mgr->mops->fpga_remove(
-						unicam->fpga_mgr);
-				}
-			}
-			fpga_mgr_put(unicam->fpga_mgr);
-		}
-		kfree(unicam);
-	}
 }
 
 static int unicam_runtime_resume(struct device *dev)
 {
-	struct unicam_device *unicam = dev_get_drvdata(dev);
+	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+	struct unicam_device *unicam;
 	int ret;
+	if (!indio_dev)
+		return -ENODEV;
+	unicam = iio_priv(indio_dev);
+	/* 1) VPU clock: min-rate is optional on many platforms */
 	ret = clk_set_min_rate(unicam->vpu_clock, MIN_VPU_CLOCK_RATE);
 	if (ret) {
-		dev_err(dev, "failed to set up VPU clock\n");
-		return ret;
+		if (ret == -EOPNOTSUPP || ret == -EINVAL) {
+			dev_warn(
+				dev,
+				"VPU clock min_rate not supported (%d), continuing\n",
+				ret);
+		} else {
+			dev_err(dev,
+				"failed to set up VPU clock min_rate: %d\n",
+				ret);
+			return ret;
+		}
 	}
 	ret = clk_prepare_enable(unicam->vpu_clock);
 	if (ret) {
 		dev_err(dev, "Failed to enable VPU clock: %d\n", ret);
-		goto err_vpu_clock;
+		goto err_minrate;
 	}
+	/* 2) CSI clock: set rate (optional) then enable */
 	if (clk_get_rate(unicam->clock) != 100 * 1000 * 1000) {
 		ret = clk_set_rate(unicam->clock, 100 * 1000 * 1000);
 		if (ret) {
-			dev_err(dev, "failed to set up CSI clock\n");
-			goto err_vpu_prepare;
+			dev_err(dev, "failed to set up CSI clock rate: %d\n",
+				ret);
+			goto err_vpu;
 		}
 	}
 	ret = clk_prepare_enable(unicam->clock);
 	if (ret) {
 		dev_err(dev, "failed to enable CSI clock: %d\n", ret);
-		goto err_vpu_prepare;
+		goto err_vpu;
 	}
 	return 0;
 
-err_vpu_prepare:
+err_vpu:
 	clk_disable_unprepare(unicam->vpu_clock);
-err_vpu_clock:
-	if (clk_set_min_rate(unicam->vpu_clock, 0)) {
-		dev_err(dev, "Failed to reset the VPU clock\n");
-	}
 
-	return ret;
+err_minrate:
+	/* Reset min_rate only if it was actually applied (best-effort) */
+	ret = clk_set_min_rate(unicam->vpu_clock, 0);
+	if (ret && ret != -EOPNOTSUPP && ret != -EINVAL)
+		dev_warn(dev, "Failed to reset VPU clock min_rate: %d\n", ret);
+
+	/* Return the original failure if enable failed; for min_rate unsupported we continued */
+	return -EIO; /* replaced below in note */
 }
 
 static int unicam_runtime_suspend(struct device *dev)
 {
-	struct unicam_device *unicam = dev_get_drvdata(dev);
+	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+	struct unicam_device *unicam;
+
+	if (!indio_dev)
+		return 0;
+
+	unicam = iio_priv(indio_dev);
+
 	clk_disable_unprepare(unicam->clock);
-	if (clk_set_min_rate(unicam->vpu_clock, 0)) {
-		dev_warn(dev, "Failed to reset the VPU clock\n");
+
+	/* min_rate reset is best-effort */
+	if (clk_set_min_rate(unicam->vpu_clock, 0) &&
+	    clk_set_min_rate(unicam->vpu_clock, 0) != -EOPNOTSUPP &&
+	    clk_set_min_rate(unicam->vpu_clock, 0) != -EINVAL) {
+		dev_warn(dev, "Failed to reset the VPU clock min_rate\n");
 	}
+
 	clk_disable_unprepare(unicam->vpu_clock);
+
 	return 0;
+}
+
+static void unicam_remove(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct iio_dev *indio_dev;
+	struct unicam_device *unicam;
+	int i;
+
+	dev_info(dev, "unicam_remove\n");
+
+	indio_dev = platform_get_drvdata(pdev);
+	if (!indio_dev)
+		return;
+
+	unicam = iio_priv(indio_dev);
+
+	unicam_stop_streaming(unicam);
+
+	pm_runtime_disable(dev);
+
+	unicam_disable(unicam);
+	usleep_range(1000, 2000);
+
+	for (i = 0; i < ARRAY_SIZE(unicam->queue); i++)
+		iio_dma_buffer_exit(&unicam->queue[i]);
+
+	for (i = 0; i < ARRAY_SIZE(unicam->queue); i++)
+		iio_dma_buffer_release(&unicam->queue[i]);
+
+	/* Do NOT dma_free_coherent() here if you used dmam_alloc_coherent() */
+
+	if (unicam->fpga_i2c_mipi_config) {
+		i2c_unregister_device(unicam->fpga_i2c_mipi_config);
+		unicam->fpga_i2c_mipi_config = NULL;
+	}
+
+	if (unicam->fpga_i2c_amplifier_config) {
+		i2c_unregister_device(unicam->fpga_i2c_amplifier_config);
+		unicam->fpga_i2c_amplifier_config = NULL;
+	}
+
+	if (unicam->fpga_mgr) {
+		if (!do_not_flash_fpga && unicam->fpga_mgr->mops &&
+		    unicam->fpga_mgr->mops->fpga_remove)
+			unicam->fpga_mgr->mops->fpga_remove(unicam->fpga_mgr);
+
+		fpga_mgr_put(unicam->fpga_mgr);
+		unicam->fpga_mgr = NULL;
+	}
+
+	platform_set_drvdata(pdev, NULL);
 }
 
 static const struct dev_pm_ops unicam_pm_ops = { RUNTIME_PM_OPS(
