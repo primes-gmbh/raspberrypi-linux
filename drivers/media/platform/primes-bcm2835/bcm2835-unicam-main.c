@@ -1442,11 +1442,18 @@ static int unicam_probe(struct platform_device *pdev)
 		info.dev = dev;
 		info.firmware_name = "efinix-t120.hex.bin";
 
-		ret = fpga_mgr_load(mgr, &info);
-		if (ret) {
+		int retry = 5;
+		for (;;) {
+			ret = fpga_mgr_load(mgr, &info);
+			if (ret == 0) {
+				break;
+			}
 			dev_err(dev, "failed to program FPGA (%d)\n", ret);
-			fpga_mgr_put(mgr);
-			goto err_clear_drvdata;
+			if (retry == 0) {
+				fpga_mgr_put(mgr);
+				goto err_clear_drvdata;
+			}
+			retry--;
 		}
 
 		unicam->fpga_mgr = mgr;
