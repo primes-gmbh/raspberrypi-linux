@@ -11,7 +11,7 @@
       efinix_t120_fpga_mgr: fpga-mgr@0 {
         compatible = "efinix,fpga-passive-spi";
         reg = <0>;
-        spi-max-frequency = <25000000>;
+        spi-max-frequency = <10000000>;
         spi-cpol;
         spi-cpha;
         cdone-gpios  = <&gpio 5 GPIO_ACTIVE_HIGH>;
