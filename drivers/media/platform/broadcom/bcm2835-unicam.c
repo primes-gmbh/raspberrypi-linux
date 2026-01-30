@@ -483,7 +483,6 @@ static const struct unicam_format_info unicam_image_formats[] = {
 		.depth		= 14,
 		.csi_dt		= MIPI_CSI2_DT_RAW14,
 		.unpack		= UNICAM_PUM_UNPACK14,
-	},
 	}, {
 		.fourcc		= V4L2_PIX_FMT_Y14,
 		.unpacked_fourcc = V4L2_PIX_FMT_Y14,
