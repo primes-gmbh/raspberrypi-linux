@@ -27,11 +27,11 @@
         status = "okay";
         fpga-mgr = <&efinix_t120_fpga_mgr>;
         fpga-i2c-mipi-config {
-          busnum = <0x00>;
+          busnum = <10>;
           reg = <0x41>;
         };
         fpga-i2c-amplifier-config {
-          busnum = <0x00>;
+          busnum = <10>;
           reg = <0x73>;
         };
       };
