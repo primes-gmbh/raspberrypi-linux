@@ -116,6 +116,10 @@ struct unicam_device {
 
 	struct i2c_client *fpga_i2c_mipi_config;
 	struct i2c_client *fpga_i2c_amplifier_config;
+	u8 tia_sel0;
+	u8 tia_sel1;
+	u8 gain_sel0;
+	u8 gain_sel1;
 	struct primes_dac dac0;
 	struct primes_dac dac1;
 
@@ -962,13 +966,12 @@ static inline struct unicam_device *dev_to_unicam(struct device *dev)
 static ssize_t dac_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
-	struct iio_dev_attr *iioattr =
-		container_of(attr, struct iio_dev_attr, dev_attr);
 	struct unicam_device *unicam = dev_to_unicam(dev);
 	u16 val = (u16)-1;
 
-	if (!unicam)
+	if (!unicam) {
 		return -ENODEV;
+	}
 
 	if (strcmp(attr->attr.name, "dac0:0") == 0) {
 		val = primes_dac_read_data(&unicam->dac0, 0);
@@ -998,18 +1001,20 @@ static ssize_t dac_show(struct device *dev, struct device_attribute *attr,
 static ssize_t dac_store(struct device *dev, struct device_attribute *attr,
 			 const char *buf, size_t len)
 {
-	struct iio_dev_attr *iioattr =
-		container_of(attr, struct iio_dev_attr, dev_attr);
 	struct unicam_device *unicam = dev_to_unicam(dev);
 	u16 val;
 
-	if (!unicam)
+	if (!unicam) {
 		return -ENODEV;
+	}
 
-	if (kstrtou16(buf, 10, &val))
+	if (kstrtou16(buf, 10, &val)) {
 		return -EINVAL;
+	}
 
-	val &= 0x0fff;
+	if (val > 0x0fff) {
+		val = 0x0fff;
+	}
 
 	if (strcmp(attr->attr.name, "dac0:0") == 0) {
 		primes_dac_write_data(&unicam->dac0, 0, val);
@@ -1124,46 +1129,90 @@ static ssize_t frames_lost_show(struct device *dev,
 {
 	struct unicam_device *unicam = dev_to_unicam(dev);
 
-	if (!unicam)
+	if (!unicam) {
 		return -ENODEV;
+	}
 
 	return sprintf(buf, "%lld\n", unicam->frames_lost);
 }
 
-static ssize_t amp_show(struct device *dev, struct device_attribute *attr,
-			char *buf)
+#define SET_SEL0(C, V) primes_i2c_write_u8(C, 0x14, V)
+#define SET_SEL1(C, V) primes_i2c_write_u8(C, 0x15, V)
+#define SET_LATCH_A_LOW(C) primes_i2c_write_u8(C, 0x16, 0)
+#define SET_LATCH_A_HIGH(C) primes_i2c_write_u8(C, 0x16, 1)
+#define SET_LATCH_B_LOW(C) primes_i2c_write_u8(C, 0x17, 0)
+#define SET_LATCH_B_HIGH(C) primes_i2c_write_u8(C, 0x17, 1)
+
+static void set_tia(struct unicam_device *unicam, int sel1, int sel0)
+{
+	struct i2c_client *c = unicam->fpga_i2c_amplifier_config;
+	unicam->tia_sel1 = sel1;
+	unicam->tia_sel0 = sel0;
+	SET_LATCH_B_LOW(c);
+	usleep_range(1000, 2000);
+	SET_LATCH_A_HIGH(c);
+	usleep_range(1000, 2000);
+	SET_SEL0(c, sel0);
+	SET_SEL1(c, sel0);
+	usleep_range(1000, 2000);
+	SET_LATCH_A_LOW(c);
+	usleep_range(1000, 2000);
+}
+
+static void set_gain(struct unicam_device *unicam, int sel1, int sel0)
+{
+	struct i2c_client *c = unicam->fpga_i2c_amplifier_config;
+	unicam->gain_sel1 = sel1;
+	unicam->gain_sel0 = sel0;
+	SET_LATCH_A_LOW(c);
+	usleep_range(1000, 2000);
+	SET_LATCH_B_HIGH(c);
+	usleep_range(1000, 2000);
+	SET_SEL0(c, sel0);
+	SET_SEL1(c, sel0);
+	usleep_range(1000, 2000);
+	SET_LATCH_B_LOW(c);
+	usleep_range(1000, 2000);
+}
+
+static ssize_t gain_show(struct device *dev, struct device_attribute *attr,
+			 char *buf)
 {
 	struct unicam_device *unicam = dev_to_unicam(dev);
 	u8 s0, s1;
 
-	if (!unicam || !unicam->fpga_i2c_amplifier_config)
+	if (!unicam || !unicam->fpga_i2c_amplifier_config) {
 		return -ENXIO;
+	}
 
-	s0 = primes_i2c_read_u8(unicam->fpga_i2c_amplifier_config, 0x14);
-	s1 = primes_i2c_read_u8(unicam->fpga_i2c_amplifier_config, 0x15);
+	s0 = unicam->gain_sel0;
+	s1 = unicam->gain_sel1;
 
-	if (!s1 && !s0)
-		return sprintf(buf, "11x\n");
-	else if (!s1 && s0)
+	if (s1 && !s0) {
+		return sprintf(buf, "5x\n");
+	} else if (!s1 && !s0) {
 		return sprintf(buf, "2x\n");
+	} else if (!s1 && s0) {
+		return sprintf(buf, "1x\n");
+	}
 
 	return sprintf(buf, "unknown\n");
 }
 
-static ssize_t amp_store(struct device *dev, struct device_attribute *attr,
-			 const char *buf, size_t len)
+static ssize_t gain_store(struct device *dev, struct device_attribute *attr,
+			  const char *buf, size_t len)
 {
 	struct unicam_device *unicam = dev_to_unicam(dev);
 
 	if (!unicam || !unicam->fpga_i2c_amplifier_config)
 		return -ENXIO;
 
-	if (sysfs_streq(buf, "11x")) {
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x14, 0);
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x15, 0);
+	if (sysfs_streq(buf, "5x")) {
+		set_gain(unicam, 1, 0);
 	} else if (sysfs_streq(buf, "2x")) {
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x14, 1);
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x15, 0);
+		set_gain(unicam, 0, 0);
+	} else if (sysfs_streq(buf, "1x")) {
+		set_gain(unicam, 0, 1);
 	} else {
 		dev_warn(dev, "invalid amp value '%s'\n", buf);
 		return -EINVAL;
@@ -1172,10 +1221,10 @@ static ssize_t amp_store(struct device *dev, struct device_attribute *attr,
 	return len;
 }
 
-static ssize_t amp_available_show(struct device *dev,
-				  struct device_attribute *attr, char *buf)
+static ssize_t gain_available_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "11x 2x\n");
+	return sprintf(buf, "5x 2x 1x\n");
 }
 
 static ssize_t tia_show(struct device *dev, struct device_attribute *attr,
@@ -1184,18 +1233,20 @@ static ssize_t tia_show(struct device *dev, struct device_attribute *attr,
 	struct unicam_device *unicam = dev_to_unicam(dev);
 	u8 s0, s1;
 
-	if (!unicam || !unicam->fpga_i2c_amplifier_config)
+	if (!unicam || !unicam->fpga_i2c_amplifier_config) {
 		return -ENXIO;
+	}
 
-	s0 = primes_i2c_read_u8(unicam->fpga_i2c_amplifier_config, 0x16);
-	s1 = primes_i2c_read_u8(unicam->fpga_i2c_amplifier_config, 0x17);
+	s0 = unicam->tia_sel0;
+	s1 = unicam->tia_sel1;
 
-	if (!s1 && !s0)
+	if (!s1 && !s0) {
 		return sprintf(buf, "max\n");
-	else if (!s1 && s0)
+	} else if (s1 && !s0) {
 		return sprintf(buf, "mid\n");
-	else if (s1 && !s0)
+	} else if (!s1 && s0) {
 		return sprintf(buf, "min\n");
+	}
 
 	return sprintf(buf, "unknown\n");
 }
@@ -1209,14 +1260,11 @@ static ssize_t tia_store(struct device *dev, struct device_attribute *attr,
 		return -ENXIO;
 
 	if (sysfs_streq(buf, "max")) {
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x16, 0);
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x17, 0);
+		set_tia(unicam, 0, 0);
 	} else if (sysfs_streq(buf, "mid")) {
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x16, 1);
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x17, 0);
+		set_tia(unicam, 1, 0);
 	} else if (sysfs_streq(buf, "min")) {
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x16, 0);
-		primes_i2c_write_u8(unicam->fpga_i2c_amplifier_config, 0x17, 1);
+		set_tia(unicam, 0, 1);
 	} else {
 		dev_warn(dev, "invalid tia value '%s'\n", buf);
 		return -EINVAL;
@@ -1255,10 +1303,10 @@ PRIMES_I2C_DEVICE_ATTR(vbp, 0xbc, 1)
 PRIMES_I2C_DEVICE_ATTR(vfp, 0xc0, 1)
 
 static IIO_DEVICE_ATTR_RO(frames_lost, 0);
-static IIO_DEVICE_ATTR_RW(amp, 0);
-static IIO_DEVICE_ATTR_RO(amp_available, 0);
 static IIO_DEVICE_ATTR_RW(tia, 0);
 static IIO_DEVICE_ATTR_RO(tia_available, 0);
+static IIO_DEVICE_ATTR_RW(gain, 0);
+static IIO_DEVICE_ATTR_RO(gain_available, 0);
 
 // clang-format off
 struct iio_dev_attr iio_dev_attr_dac0[] = {
@@ -1291,10 +1339,10 @@ static struct attribute *my_attributes[] = {
 	&iio_dev_attr_vact.dev_attr.attr,
 	&iio_dev_attr_vfp.dev_attr.attr,
 	&iio_dev_attr_frames_lost.dev_attr.attr,
-	&iio_dev_attr_amp.dev_attr.attr,
-	&iio_dev_attr_amp_available.dev_attr.attr,
 	&iio_dev_attr_tia.dev_attr.attr,
 	&iio_dev_attr_tia_available.dev_attr.attr,
+	&iio_dev_attr_gain.dev_attr.attr,
+	&iio_dev_attr_gain_available.dev_attr.attr,
 	&iio_dev_attr_dac0[0].dev_attr.attr,
 	&iio_dev_attr_dac0[1].dev_attr.attr,
 	&iio_dev_attr_dac0[2].dev_attr.attr,
